@@ -27,10 +27,10 @@ class SiteOpenSignup(_PluginBase):
     """站点开放注册监测插件 - 自动更新网页"""
 
     # 插件基本信息
-    plugin_name = "站点开放注册监测"
+    plugin_name = "PT站开放注册监控"
     plugin_desc = "自动监测站点注册页面状态，检测是否开放注册，自动更新网页"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/statistic.png"
-    plugin_version = "1.2.1"
+    plugin_version = "1.2.2"
     plugin_author = "bfjy,silverfoxonline"
     author_url = "https://bfjy2024.github.io/bfjy"
     plugin_config_prefix = "siteopensignup_"

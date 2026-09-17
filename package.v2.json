@@ -1,13 +1,14 @@
 {
   "SiteOpenSignup": {
-    "name": "站点开放注册监测",
+    "name": "PT站开放注册监控",
     "description": "自动监测站点注册页面状态，仅在站点变为开放注册时发送通知。",
     "labels": "站点,监测",
-    "version": "1.2.1",
+    "version": "1.2.2",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/statistic.png",
     "author": "bfjy,silverfoxonline",
     "level": 2,
     "history": {
+      "v1.2.2": "插件名称调整为 PT站开放注册监控",
       "v1.2.1": "修复普通 Cloudflare 资源导致的误判，仅在站点变为开放时通知",
       "v1.2.0": "支持自动监测站点注册页面状态"
     }
