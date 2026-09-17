@@ -3,11 +3,12 @@
     "name": "PT站开放注册监控",
     "description": "自动监测站点注册页面状态，仅在站点变为开放注册时发送通知。",
     "labels": "站点,监测",
-    "version": "1.2.3",
+    "version": "1.2.4",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/statistic.png",
     "author": "bfjy,silverfoxonline",
     "level": 1,
     "history": {
+      "v1.2.4": "服务和远程命令使用独立标识，避免与原插件冲突",
       "v1.2.3": "使用独立插件 ID，并调整为所有用户可见",
       "v1.2.2": "插件名称调整为 PT站开放注册监控",
       "v1.2.1": "修复普通 Cloudflare 资源导致的误判，仅在站点变为开放时通知",

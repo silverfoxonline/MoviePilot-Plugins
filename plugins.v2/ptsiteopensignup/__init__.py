@@ -30,7 +30,7 @@ class PTSiteOpenSignup(_PluginBase):
     plugin_name = "PT站开放注册监控"
     plugin_desc = "自动监测站点注册页面状态，检测是否开放注册，自动更新网页"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/statistic.png"
-    plugin_version = "1.2.3"
+    plugin_version = "1.2.4"
     plugin_author = "bfjy,silverfoxonline"
     author_url = "https://bfjy2024.github.io/bfjy"
     plugin_config_prefix = "ptsiteopensignup_"
@@ -165,17 +165,17 @@ class PTSiteOpenSignup(_PluginBase):
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
         return [{
-            "cmd": "/site_opensignup",
+            "cmd": "/pt_site_opensignup",
             "event": EventType.PluginAction,
             "desc": "刷新站点开放注册状态",
             "category": "站点",
-            "data": {"action": "site_opensignup_refresh"}
+            "data": {"action": "pt_site_opensignup_refresh"}
         }, {
-            "cmd": "/site_opensignup_web",
+            "cmd": "/pt_site_opensignup_web",
             "event": EventType.PluginAction,
             "desc": "更新开放注册网页",
             "category": "站点",
-            "data": {"action": "site_opensignup_web"}
+            "data": {"action": "pt_site_opensignup_web"}
         }]
 
     def get_api(self) -> List[Dict[str, Any]]:
@@ -196,7 +196,7 @@ class PTSiteOpenSignup(_PluginBase):
         if self._enabled and self._cron:
             try:
                 return [{
-                    "id": "SiteOpenSignup",
+                    "id": "PTSiteOpenSignup",
                     "name": "站点开放注册监测刷新",
                     "trigger": CronTrigger.from_crontab(self._cron),
                     "func": self.__refresh_status,
@@ -776,9 +776,9 @@ class PTSiteOpenSignup(_PluginBase):
         event_data = event.event_data
         action = event_data.get("action")
 
-        if action == "site_opensignup_refresh":
+        if action == "pt_site_opensignup_refresh":
             self.__refresh_status()
-        elif action == "site_opensignup_web":
+        elif action == "pt_site_opensignup_web":
             if not self._web_enabled:
                 self.post_message(
                     mtype=NotificationType.SiteMessage,
