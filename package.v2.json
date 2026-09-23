@@ -3,11 +3,12 @@
     "name": "下载任务标签自定义",
     "description": "根据 Tracker 域名为下载任务添加自定义标签，不依赖 MP2 站点管理。",
     "labels": "下载,标签,站点",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Youtube-dl_B.png",
     "author": "silverfoxonline",
     "level": 1,
     "history": {
+      "v1.1.0": "增加扫描防并发、标签写入结果校验和详情页成功失败日志",
       "v1.0.0": "支持 Tracker 到自定义标签映射，内置 BLU、AITHER、BHD"
     }
   },

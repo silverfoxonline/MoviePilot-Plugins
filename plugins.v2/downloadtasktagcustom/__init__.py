@@ -17,7 +17,7 @@ class DownloadTaskTagCustom(_PluginBase):
     plugin_name = "下载任务标签自定义"
     plugin_desc = "根据 Tracker 域名为下载任务添加自定义标签"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Youtube-dl_B.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "downloadtasktagcustom_"
@@ -32,6 +32,7 @@ class DownloadTaskTagCustom(_PluginBase):
     _tracker_mappings: Dict[str, str] = {}
     _scheduler: Optional[BackgroundScheduler] = None
     _event = threading.Event()
+    _scan_lock = threading.Lock()
 
     DEFAULT_MAPPINGS = "\n".join([
         "blutopia.cc -> BLU",
@@ -111,18 +112,41 @@ class DownloadTaskTagCustom(_PluginBase):
         return active_services or None
 
     def _scan_downloaders(self):
+        if not self._scan_lock.acquire(blocking=False):
+            logger.warning("[DownloadTaskTagCustom] 已有扫描任务运行，本次跳过")
+            history = self.get_data("tag_logs") or []
+            history.append(self._result_record(
+                downloader="-", status="跳过", message="已有扫描任务运行"
+            ))
+            self.save_data("tag_logs", history[-200:])
+            return
+
+        try:
+            self._do_scan()
+        finally:
+            self._scan_lock.release()
+
+    def _do_scan(self):
         services = self.service_infos
         if not services or not self._tracker_mappings:
             return
 
+        records = []
         scanned = 0
         tagged = 0
+        failed = 0
         logger.info("[DownloadTaskTagCustom] 开始扫描下载任务")
         for service in services.values():
             if self._event.is_set():
                 return
             torrents, error = service.instance.get_torrents()
-            if error or not torrents:
+            if error:
+                records.append(self._result_record(
+                    downloader=service.name, status="失败", message=str(error)
+                ))
+                failed += 1
+                continue
+            if not torrents:
                 continue
             for torrent in torrents:
                 if self._event.is_set():
@@ -138,9 +162,28 @@ class DownloadTaskTagCustom(_PluginBase):
                 torrent_hash = self._get_hash(torrent, service.type)
                 if not torrent_hash:
                     continue
-                self._add_labels(service, torrent_hash, torrent, current_labels, new_labels)
-                tagged += 1
-        logger.info(f"[DownloadTaskTagCustom] 扫描完成: {scanned} 个任务，新增标签 {tagged} 个任务")
+                success, message = self._add_labels(
+                    service, torrent_hash, torrent, current_labels, new_labels
+                )
+                records.append(self._result_record(
+                    downloader=service.name,
+                    task=self._get_name(torrent, service.type),
+                    labels=",".join(new_labels),
+                    status="成功" if success else "失败",
+                    message=message,
+                ))
+                if len(records) % 25 == 0:
+                    self._save_records(records)
+                if success:
+                    tagged += 1
+                else:
+                    failed += 1
+
+        self._save_records(records)
+        logger.info(
+            f"[DownloadTaskTagCustom] 扫描完成: {scanned} 个任务，"
+            f"新增标签成功 {tagged} 个任务，失败 {failed} 个任务"
+        )
 
     def _matched_labels(self, trackers: List[str]) -> List[str]:
         labels = []
@@ -168,6 +211,10 @@ class DownloadTaskTagCustom(_PluginBase):
         return torrent.get("hash", "") if downloader_type == "qbittorrent" else torrent.hashString
 
     @staticmethod
+    def _get_name(torrent: Any, downloader_type: str) -> str:
+        return torrent.get("name", "") if downloader_type == "qbittorrent" else torrent.name
+
+    @staticmethod
     def _get_trackers(torrent: Any, downloader_type: str) -> List[str]:
         if downloader_type == "qbittorrent":
             return [
@@ -188,16 +235,58 @@ class DownloadTaskTagCustom(_PluginBase):
 
     @staticmethod
     def _add_labels(service: ServiceInfo, torrent_hash: str, torrent: Any,
-                    current_labels: List[str], new_labels: List[str]):
-        if service.type == "qbittorrent":
-            service.instance.set_torrents_tag(ids=torrent_hash, tags=new_labels)
-        else:
-            labels = sorted(set(current_labels).union(new_labels))
-            service.instance.set_torrent_tag(ids=torrent_hash, tags=labels)
-        logger.warning(
-            f"[DownloadTaskTagCustom] 下载器: {service.name} 种子id: {torrent_hash} "
-            f"新增标签: {','.join(new_labels)}"
-        )
+                    current_labels: List[str], new_labels: List[str]) -> Tuple[bool, str]:
+        try:
+            if service.type == "qbittorrent":
+                result = service.instance.set_torrents_tag(ids=torrent_hash, tags=new_labels)
+                torrents, error = service.instance.get_torrents(ids=torrent_hash)
+                result = not error and bool(torrents) and set(new_labels).issubset(
+                    set(DownloadTaskTagCustom._get_labels(torrents[0], service.type))
+                )
+            else:
+                labels = sorted(set(current_labels).union(new_labels))
+                result = service.instance.set_torrent_tag(ids=torrent_hash, tags=labels)
+            if not result:
+                message = "下载器接口返回失败"
+                logger.error(
+                    f"[DownloadTaskTagCustom] 下载器: {service.name} 种子id: {torrent_hash} "
+                    f"新增标签失败: {','.join(new_labels)}"
+                )
+                return False, message
+            logger.info(
+                f"[DownloadTaskTagCustom] 下载器: {service.name} 种子id: {torrent_hash} "
+                f"新增标签成功: {','.join(new_labels)}"
+            )
+            return True, ""
+        except Exception as err:
+            logger.exception(
+                f"[DownloadTaskTagCustom] 下载器: {service.name} 种子id: {torrent_hash} "
+                f"新增标签异常: {err}"
+            )
+            return False, str(err)
+
+    def _save_records(self, records: List[dict]):
+        if not records:
+            return
+        history = self.get_data("tag_logs") or []
+        known = {(item.get("time"), item.get("downloader"), item.get("task")) for item in history}
+        new_records = [
+            item for item in records
+            if (item.get("time"), item.get("downloader"), item.get("task")) not in known
+        ]
+        self.save_data("tag_logs", (history + new_records)[-200:])
+
+    @staticmethod
+    def _result_record(downloader: str, status: str, task: str = "",
+                       labels: str = "", message: str = "") -> dict:
+        return {
+            "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "downloader": downloader,
+            "task": task,
+            "labels": labels,
+            "status": status,
+            "message": message,
+        }
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [{
@@ -258,7 +347,32 @@ class DownloadTaskTagCustom(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        return []
+        records = list(reversed(self.get_data("tag_logs") or []))
+        return [{
+            "component": "VRow",
+            "content": [{
+                "component": "VCol",
+                "props": {"cols": 12},
+                "content": [{
+                    "component": "VDataTableVirtual",
+                    "props": {
+                        "headers": [
+                            {"title": "时间", "key": "time"},
+                            {"title": "下载器", "key": "downloader"},
+                            {"title": "任务", "key": "task"},
+                            {"title": "标签", "key": "labels"},
+                            {"title": "结果", "key": "status"},
+                            {"title": "说明", "key": "message"},
+                        ],
+                        "items": records,
+                        "height": "36rem",
+                        "density": "compact",
+                        "fixed-header": True,
+                        "hover": True,
+                    },
+                }],
+            }],
+        }]
 
     def get_command(self) -> List[Dict[str, Any]]:
         return []
