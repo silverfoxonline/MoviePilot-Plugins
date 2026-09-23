@@ -12,6 +12,18 @@
       "v1.0.0": "支持 Tracker 到自定义标签映射，内置 BLU、AITHER、BHD"
     }
   },
+  "DStudioSignIn": {
+    "name": "DStudio签到",
+    "description": "使用 MoviePilot 站点配置自动完成 DStudio 每日签到。",
+    "labels": "站点,签到",
+    "version": "1.0.0",
+    "icon": "signin.png",
+    "author": "silverfoxonline",
+    "level": 1,
+    "history": {
+      "v1.0.0": "支持 DStudio 定时签到、立即运行、结果通知和签到历史"
+    }
+  },
   "PTSiteOpenSignup": {
     "name": "PT站开放注册监控",
     "description": "自动监测站点注册页面状态，仅在站点变为开放注册时发送通知。",
