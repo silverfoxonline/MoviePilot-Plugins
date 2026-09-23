@@ -16,11 +16,12 @@
     "name": "DStudio签到",
     "description": "使用 MoviePilot 站点配置自动完成 DStudio 每日签到。",
     "labels": "站点,签到",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "icon": "signin.png",
     "author": "silverfoxonline",
     "level": 1,
     "history": {
+      "v1.1.0": "新增签到统计页面，展示本次魔力、连续签到、累计签到和今日排名",
       "v1.0.0": "支持 DStudio 定时签到、立即运行、结果通知和签到历史"
     }
   },

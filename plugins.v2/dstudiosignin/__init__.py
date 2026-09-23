@@ -23,7 +23,7 @@ class DStudioSignIn(_PluginBase):
     plugin_name = "DStudio签到"
     plugin_desc = "自动完成 DStudio 每日签到"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "dstudiosignin_"
@@ -128,8 +128,9 @@ class DStudioSignIn(_PluginBase):
                 return
 
             success, status, message = self._parse_result(page_source)
+            stats = self._parse_stats(page_source)
             self.__record_site_result(site_url, started_at, success)
-            self.__finish(success, status, message)
+            self.__finish(success, status, message, stats)
         except Exception as err:
             logger.exception(f"[DStudioSignIn] 签到异常: {err}")
             self.__finish(False, "签到异常", str(err))
@@ -175,6 +176,23 @@ class DStudioSignIn(_PluginBase):
         source = re.sub(r"<[^>]+>", " ", source)
         return re.sub(r"\s+", " ", html.unescape(source)).strip()
 
+    @staticmethod
+    def _parse_stats(page_source: str) -> Dict[str, Any]:
+        text = DStudioSignIn._extract_text(page_source)
+        patterns = {
+            "sign_count": r"第\s*(\d+)\s*次签到",
+            "streak_days": r"连续签到\s*(\d+)\s*天",
+            "reward": r"本次签到获得\s*(\d+)\s*个魔力值",
+        }
+        stats = {}
+        for key, pattern in patterns.items():
+            match = re.search(pattern, text)
+            stats[key] = int(match.group(1)) if match else None
+
+        rank_match = re.search(r"今日签到排名[：:]\s*(\d+)\s*/\s*(\d+)", text)
+        stats["rank"] = f"{rank_match.group(1)} / {rank_match.group(2)}" if rank_match else None
+        return stats
+
     def __record_site_result(self, site_url: str, started_at: datetime.datetime, success: bool):
         domain = StringUtils.get_url_domain(site_url)
         if not domain:
@@ -185,11 +203,12 @@ class DStudioSignIn(_PluginBase):
         else:
             SiteOper().fail(domain)
 
-    def __finish(self, success: bool, status: str, message: str):
+    def __finish(self, success: bool, status: str, message: str, stats: Optional[dict] = None):
         record = {
             "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "status": status,
             "message": message,
+            **(stats or {}),
         }
         history = self.get_data("signin_history") or []
         history.append(record)
@@ -267,28 +286,97 @@ class DStudioSignIn(_PluginBase):
 
     def get_page(self) -> List[dict]:
         records = list(reversed(self.get_data("signin_history") or []))
+        if not records:
+            return [{
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "text": "暂无签到记录，请先运行一次签到。",
+                },
+            }]
+
+        headers = ["时间", "状态", "本次魔力", "连续签到", "累计签到", "今日排名"]
         return [{
-            "component": "VRow",
+            "component": "VCard",
+            "props": {
+                "variant": "outlined",
+                "class": "pa-4",
+                "style": "border-radius: 14px;",
+            },
             "content": [{
-                "component": "VCol",
-                "props": {"cols": 12},
+                "component": "div",
+                "props": {
+                    "class": "text-h6 font-weight-bold mb-4",
+                    "style": "letter-spacing: 0.2px;",
+                },
+                "text": "📊 DStudio 签到历史",
+            }, {
+                "component": "VTable",
+                "props": {
+                    "density": "compact",
+                    "hover": True,
+                    "fixed-header": True,
+                    "height": "32rem",
+                },
                 "content": [{
-                    "component": "VDataTableVirtual",
-                    "props": {
-                        "headers": [
-                            {"title": "时间", "key": "time"},
-                            {"title": "结果", "key": "status"},
-                            {"title": "说明", "key": "message"},
-                        ],
-                        "items": records,
-                        "height": "30rem",
-                        "density": "compact",
-                        "fixed-header": True,
-                        "hover": True,
-                    },
+                    "component": "thead",
+                    "content": [{
+                        "component": "tr",
+                        "content": [{
+                            "component": "th",
+                            "props": {"class": "text-start"},
+                            "text": title,
+                        } for title in headers],
+                    }],
+                }, {
+                    "component": "tbody",
+                    "content": [self.__build_history_row(record) for record in records],
                 }],
             }],
         }]
+
+    @staticmethod
+    def __build_history_row(record: dict) -> dict:
+        status = record.get("status") or "未知"
+        success = status in {"签到成功", "今日已签到"}
+        status_color = "success" if success else "warning" if status == "结果未知" else "error"
+
+        def metric(key: str, icon: str) -> str:
+            value = record.get(key)
+            return f"{value} {icon}" if value is not None else "—"
+
+        cells = [{
+            "component": "td",
+            "props": {"class": "text-medium-emphasis"},
+            "text": record.get("time") or "—",
+        }, {
+            "component": "td",
+            "content": [{
+                "component": "VChip",
+                "props": {
+                    "size": "small",
+                    "variant": "outlined",
+                    "color": status_color,
+                    "title": record.get("message") or status,
+                },
+                "text": status,
+            }],
+        }]
+        cells.extend({
+            "component": "td",
+            "props": {"class": "text-medium-emphasis"},
+            "text": value,
+        } for value in [
+            metric("reward", "✨"),
+            metric("streak_days", "🔥"),
+            metric("sign_count", "📅"),
+            metric("rank", "🏆"),
+        ])
+        return {
+            "component": "tr",
+            "content": cells,
+        }
 
     def get_command(self) -> List[Dict[str, Any]]:
         return []
