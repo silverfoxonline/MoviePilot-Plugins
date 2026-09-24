@@ -1,4 +1,16 @@
 {
+  "DownloadSiteTagCustom": {
+    "name": "下载任务分类与标签自定义",
+    "description": "基于下载任务分类与标签 2.6，统一 Aither、BeyondHD、Orpheus、Blutopia 和 GazelleGames 的站点标签名。",
+    "labels": "下载,标签,站点",
+    "version": "2.6.1",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Youtube-dl_B.png",
+    "author": "silverfoxonline",
+    "level": 1,
+    "history": {
+      "v2.6.1": "基于叮叮当 2.6，统一站点标签为 AITHER、BHD、OPS、BLU、GGn"
+    }
+  },
   "DownloadTaskTagCustom": {
     "name": "下载任务标签自定义",
     "description": "根据 Tracker 域名为下载任务添加自定义标签，不依赖 MP2 站点管理。",

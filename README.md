@@ -10,6 +10,20 @@ https://github.com/silverfoxonline/MoviePilot-Plugins
 
 ## 插件
 
+### 下载任务分类与标签自定义
+
+基于叮叮当的“下载任务分类与标签”2.6，保留原插件功能，并统一以下站点标签：
+
+```text
+Aither / aither.cc -> AITHER
+BeyondHD / beyond-hd.me -> BHD
+Orpheus / orpheus.network -> OPS
+Blutopia / blutopia.cc -> BLU
+GazelleGames / gazellegames.net -> GGn
+```
+
+安装并迁移配置后应停用原版插件，避免两个插件同时处理下载任务。
+
 ### 下载任务标签自定义
 
 根据 Tracker 域名为下载任务添加自定义标签，不依赖 MoviePilot 站点管理。默认支持：
