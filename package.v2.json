@@ -1,6 +1,6 @@
 {
   "DownloadSiteTagCustom": {
-    "name": "下载任务分类与标签自定义",
+    "name": "下载任务分类与标签-改版",
     "description": "基于下载任务分类与标签 2.6，统一 Aither、BeyondHD、Orpheus、Blutopia 和 GazelleGames 的站点标签名。",
     "labels": "下载,标签,站点",
     "version": "2.6.1",

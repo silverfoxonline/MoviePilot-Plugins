@@ -22,7 +22,7 @@ from app.utils.string import StringUtils
 
 class DownloadSiteTagCustom(_PluginBase):
     # 插件名称
-    plugin_name = "下载任务分类与标签自定义"
+    plugin_name = "下载任务分类与标签-改版"
     # 插件描述
     plugin_desc = "自动给下载任务分类，并将指定站点名称统一为自定义标签"
     # 插件图标

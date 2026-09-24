@@ -10,7 +10,7 @@ https://github.com/silverfoxonline/MoviePilot-Plugins
 
 ## 插件
 
-### 下载任务分类与标签自定义
+### 下载任务分类与标签-改版
 
 基于叮叮当的“下载任务分类与标签”2.6，保留原插件功能，并统一以下站点标签：
 
