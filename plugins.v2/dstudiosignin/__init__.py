@@ -23,7 +23,7 @@ class DStudioSignIn(_PluginBase):
     plugin_name = "DStudio签到"
     plugin_desc = "自动完成 DStudio 每日签到"
     plugin_icon = "signin.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "dstudiosignin_"
@@ -259,11 +259,55 @@ class DStudioSignIn(_PluginBase):
             logger.error(log_message)
 
         if self._notify:
-            self.post_message(
-                title=f"【DStudio签到】{status}",
-                mtype=NotificationType.SiteMessage,
-                text=message,
+            title, notification_text = self._build_notification(
+                success=success,
+                status=status,
+                message=message,
+                stats=stats,
+                finished_at=record["time"],
             )
+            self.post_message(
+                title=title,
+                mtype=NotificationType.SiteMessage,
+                text=notification_text,
+            )
+
+    @staticmethod
+    def _build_notification(
+        success: bool,
+        status: str,
+        message: str,
+        stats: Optional[dict],
+        finished_at: str,
+    ) -> Tuple[str, str]:
+        separator = "━━━━━━━━━━━━"
+        if not success:
+            return "【🎬DStudio签到】任务失败", "\n".join([
+                f"❌ 状态：{status}",
+                separator,
+                f"⚠️ 失败原因：{message}",
+                separator,
+                f"🕘 执行时间：{finished_at}",
+            ])
+
+        stats = stats or {}
+
+        def metric(key: str, suffix: str = "") -> str:
+            value = stats.get(key)
+            return f"{value}{suffix}" if value is not None else "—"
+
+        display_status = "已签到" if status in {"签到成功", "今日已签到"} else status
+        return "【🎬DStudio签到】任务完成", "\n".join([
+            f"✨ 状态：✅ {display_status}",
+            separator,
+            "📊 数据统计",
+            f"✨ 本次魔力：{metric('reward')}",
+            f"🔥 连续签到：{metric('streak_days', '天')}",
+            f"📅 累计签到：{metric('sign_count', '次')}",
+            f"🏆 今日排名：{metric('rank')}",
+            separator,
+            f"🕘 签到时间：{finished_at}",
+        ])
 
     def __update_config(self):
         self.update_config({
