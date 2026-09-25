@@ -23,7 +23,7 @@ class DStudioSignIn(_PluginBase):
     plugin_name = "DStudio签到"
     plugin_desc = "自动完成 DStudio 每日签到"
     plugin_icon = "signin.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "dstudiosignin_"
@@ -105,12 +105,13 @@ class DStudioSignIn(_PluginBase):
 
             sign_url = "https://dstudio.me/attendance.php"
             logger.info(f"[DStudioSignIn] 开始签到: {site_name} - {sign_url}")
-            response = RequestUtils(
+            request = RequestUtils(
                 cookies=site_cookie,
                 ua=site.get("ua"),
                 proxies=settings.PROXY if site.get("proxy") else None,
                 timeout=site.get("timeout") or 60,
-            ).get_res(url=sign_url)
+            )
+            response = request.get_res(url=sign_url)
 
             if response is None:
                 self.__record_site_result(site_url, started_at, False)
@@ -128,6 +129,29 @@ class DStudioSignIn(_PluginBase):
                 return
 
             success, status, message = self._parse_result(page_source)
+            if not success and self._has_signin_form(page_source):
+                logger.info("[DStudioSignIn] 检测到待签到表单，正在提交")
+                response = request.post_res(
+                    url=sign_url,
+                    data={},
+                    headers={"Referer": sign_url},
+                )
+                if response is None:
+                    self.__record_site_result(site_url, started_at, False)
+                    self.__finish(False, "签到失败", "无法提交 DStudio 签到表单")
+                    return
+                if response.status_code != 200:
+                    self.__record_site_result(site_url, started_at, False)
+                    self.__finish(False, "签到失败", f"签到请求返回 HTTP {response.status_code}")
+                    return
+
+                page_source = response.text or ""
+                if not SiteUtils.is_logged_in(page_source):
+                    self.__record_site_result(site_url, started_at, False)
+                    self.__finish(False, "Cookie已失效", "DStudio 签到请求返回了未登录页面")
+                    return
+                success, status, message = self._parse_result(page_source)
+
             stats = self._parse_stats(page_source)
             self.__record_site_result(site_url, started_at, success)
             self.__finish(success, status, message, stats)
@@ -169,6 +193,20 @@ class DStudioSignIn(_PluginBase):
         if failure_match:
             return False, "签到失败", failure_match.group(0)
         return False, "结果未知", "已登录，但签到页未返回可识别的成功状态"
+
+    @staticmethod
+    def _has_signin_form(page_source: str) -> bool:
+        for form_tag in re.findall(r"<form\b[^>]*>", page_source, flags=re.I):
+            is_post = re.search(r"\bmethod\s*=\s*(['\"]?)post\1", form_tag, flags=re.I)
+            targets_attendance = re.search(
+                r"\baction\s*=\s*(['\"]?)(?:https://dstudio\.me/|\./)?attendance\.php"
+                r"(?:\?[^'\"\s>]*)?\1",
+                form_tag,
+                flags=re.I,
+            )
+            if is_post and targets_attendance:
+                return True
+        return False
 
     @staticmethod
     def _extract_text(page_source: str) -> str:
