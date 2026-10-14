@@ -20,13 +20,23 @@ class _Dummy:
         pass
 
 
+class _FakeCronTrigger:
+    def __init__(self, expression):
+        self.expression = expression
+        self.jitter = None
+
+    @classmethod
+    def from_crontab(cls, expression):
+        return cls(expression)
+
+
 _module("pytz", timezone=lambda value: value)
 _module("requests", Session=_Dummy, Response=_Dummy)
 _module("apscheduler")
 _module("apscheduler.schedulers")
 _module("apscheduler.schedulers.background", BackgroundScheduler=_Dummy)
 _module("apscheduler.triggers")
-_module("apscheduler.triggers.cron", CronTrigger=_Dummy)
+_module("apscheduler.triggers.cron", CronTrigger=_FakeCronTrigger)
 _module("app")
 _module("app.core")
 _module("app.core.config", settings=types.SimpleNamespace(TZ="Asia/Shanghai", USER_AGENT="test", PROXY=None))
@@ -126,6 +136,21 @@ class BLUEventClaimParserTest(unittest.TestCase):
             BLUEventClaim._normalized_event_url("https://blutopia.cc/giveaways/4/claims"), "",
         )
 
+    def test_cron_random_delay_uses_apscheduler_jitter(self):
+        plugin = BLUEventClaim()
+        plugin._enabled = True
+        plugin._cron = "5 9 * * *"
+        plugin._random_delay = 30
+
+        service = plugin.get_service()[0]
+        self.assertEqual(service["trigger"].expression, "5 9 * * *")
+        self.assertEqual(service["trigger"].jitter, 30 * 60)
+
+        plugin.init_plugin({"random_delay": 999})
+        self.assertEqual(plugin._random_delay, 60)
+        plugin.init_plugin({"random_delay": -1})
+        self.assertEqual(plugin._random_delay, 0)
+
     def test_claim_flow_verifies_the_result_page(self):
         unclaimed = """
         <meta name="csrf-token" content="token-value">
@@ -171,6 +196,8 @@ class BLUEventClaimParserTest(unittest.TestCase):
         self.assertEqual(FakeRequest.post_calls, 1)
 
     def test_detail_page_reads_only_the_current_event_cache(self):
+        self.assertEqual(BLUEventClaim.MAX_HISTORY, 10)
+
         class NetworkMustNotBeUsed:
             def __init__(self, *args, **kwargs):
                 raise AssertionError("get_page must not create a network client")
@@ -185,33 +212,61 @@ class BLUEventClaimParserTest(unittest.TestCase):
                 current_url: {
                     "event_title": "Current Event",
                     "updated_at": "2026-10-14 09:05:00",
-                    "total_days": 1,
+                    "total_days": 19,
                     "claimed_days": 1,
-                    "expired_days": 0,
+                    "expired_days": 1,
                     "claimable_days": 0,
-                    "future_days": 0,
+                    "future_days": 17,
                     "reward_totals": [{"label": "BON", "display": "8,924"}],
-                    "days": [{
-                        "date": "Oct 14", "status": "已领取",
-                        "rewards": ["8924 BON"], "message": "8924 BON",
-                    }],
+                    "days": [
+                        {
+                            "date": f"Oct {day}",
+                            "status": "已领取" if day == 14 else "待开放",
+                            "rewards": ["8924 BON"] if day == 14 else [],
+                            "message": "8924 BON" if day == 14 else "Check back later!",
+                        }
+                        for day in range(13, 32)
+                    ],
                 },
                 other_url: {"event_title": "Other Event"},
             },
-            "claim_logs": [{
-                "event_url": current_url,
-                "time": "2026-10-14 09:05:00",
-                "status": "成功",
-                "reward": "8924 BON",
-                "message": "领取成功",
-            }],
+            "claim_logs": [
+                {
+                    "event_url": current_url,
+                    "time": f"2026-10-{day:02d} 09:05:00",
+                    "status": "成功",
+                    "reward": "8924 BON",
+                    "message": "领取成功",
+                }
+                for day in range(1, 13)
+            ],
         }
         plugin.get_data = lambda key: stored.get(key)
 
-        rendered = str(plugin.get_page())
-        self.assertIn("Current Event", rendered)
+        page = plugin.get_page()
+        rendered = str(page)
+        self.assertIn("Current Event  (Start: 2026/10/13)", rendered)
         self.assertIn("8,924", rendered)
         self.assertNotIn("Other Event", rendered)
+        self.assertNotIn("最后检查", rendered)
+        self.assertNotIn("本页只读取", rendered)
+
+        def components(value):
+            if isinstance(value, dict):
+                yield value
+                for child in value.values():
+                    yield from components(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from components(child)
+
+        tables = [item for item in components(page) if item.get("component") == "VDataTable"]
+        self.assertEqual([len(item["props"]["items"]) for item in tables], [10, 9, 10])
+        for table in tables:
+            self.assertNotIn("height", table["props"])
+            self.assertNotIn("fixed-header", table["props"])
+            self.assertEqual(table["props"]["items-per-page"], -1)
+            self.assertTrue(table["props"]["hide-default-footer"])
 
 
 if __name__ == "__main__":

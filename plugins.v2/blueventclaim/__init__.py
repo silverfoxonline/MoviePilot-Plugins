@@ -36,13 +36,14 @@ class BLUEventClaim(_PluginBase):
     DEFAULT_EVENT_URL = "https://blutopia.cc/giveaways/4"
     DEFAULT_CRON = "5 9 * * *"
     REQUEST_TIMEOUT = 30
-    MAX_HISTORY = 100
+    MAX_HISTORY = 10
     MAX_EVENT_SNAPSHOTS = 20
 
     _enabled = False
     _onlyonce = False
     _notify = True
     _cron = DEFAULT_CRON
+    _random_delay = 0
     _event_url = DEFAULT_EVENT_URL
     _cookie = ""
     _scheduler: Optional[BackgroundScheduler] = None
@@ -56,6 +57,10 @@ class BLUEventClaim(_PluginBase):
             self._onlyonce = config.get("onlyonce", False)
             self._notify = config.get("notify", True)
             self._cron = config.get("cron") or self.DEFAULT_CRON
+            try:
+                self._random_delay = min(max(int(config.get("random_delay") or 0), 0), 60)
+            except (TypeError, ValueError):
+                self._random_delay = 0
             self._event_url = (config.get("event_url") or self.DEFAULT_EVENT_URL).strip()
             self._cookie = (config.get("cookie") or "").strip()
 
@@ -81,10 +86,12 @@ class BLUEventClaim(_PluginBase):
         if not self._enabled or not self._cron:
             return []
         try:
+            trigger = CronTrigger.from_crontab(self._cron)
+            trigger.jitter = self._random_delay * 60
             return [{
                 "id": "BLUEventClaim",
                 "name": "BLU活动奖励自动领取",
-                "trigger": CronTrigger.from_crontab(self._cron),
+                "trigger": trigger,
                 "func": self._claim_reward,
                 "kwargs": {},
             }]
@@ -107,6 +114,7 @@ class BLUEventClaim(_PluginBase):
             "onlyonce": False,
             "notify": self._notify,
             "cron": self._cron,
+            "random_delay": self._random_delay,
             "event_url": self._event_url,
             "cookie": self._cookie,
         })
@@ -561,7 +569,18 @@ class BLUEventClaim(_PluginBase):
                 "component": "VRow",
                 "content": [{
                     "component": "VCol",
-                    "props": {"cols": 12},
+                    "props": {"cols": 12, "md": 3},
+                    "content": [{"component": "VTextField", "props": {
+                        "model": "random_delay",
+                        "label": "随机延迟（分钟）",
+                        "type": "number",
+                        "min": 0,
+                        "max": 60,
+                        "hint": "Cron 到点后随机延迟 0～N 分钟；0 表示关闭。",
+                    }}],
+                }, {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 9},
                     "content": [{"component": "VTextField", "props": {
                         "model": "event_url",
                         "label": "BLU 活动详情页",
@@ -587,7 +606,7 @@ class BLUEventClaim(_PluginBase):
                 "props": {
                     "type": "info",
                     "variant": "tonal",
-                    "text": "仅定时任务或立即运行时访问 BLU；打开详情页只读取本地缓存。已领取时请求一次，需要领取时请求两次。默认每天 09:05 执行。",
+                    "text": "仅定时任务或立即运行时访问 BLU；打开详情页只读取本地缓存。已领取时请求一次，需要领取时请求两次。随机延迟只影响 Cron 定时任务，不影响立即运行。",
                 },
             }],
         }], {
@@ -595,6 +614,7 @@ class BLUEventClaim(_PluginBase):
             "onlyonce": False,
             "notify": True,
             "cron": self.DEFAULT_CRON,
+            "random_delay": 0,
             "event_url": self.DEFAULT_EVENT_URL,
             "cookie": "",
         }
@@ -608,7 +628,7 @@ class BLUEventClaim(_PluginBase):
             item for item in all_records
             if item.get("event_url") == event_url
             or (not item.get("event_url") and event_url == self.DEFAULT_EVENT_URL)
-        ]
+        ][:10]
         if not snapshot:
             return [{
                 "component": "VAlert",
@@ -640,14 +660,20 @@ class BLUEventClaim(_PluginBase):
             "status": status_icons.get(day.get("status"), day.get("status", "状态未知")),
             "detail": " / ".join(day.get("rewards") or []) or day.get("message") or "—",
         } for day in snapshot.get("days") or []]
+        day_split = (len(day_items) + 1) // 2
+        day_columns = [day_items[:day_split], day_items[day_split:]]
+        event_heading = (
+            f"{snapshot.get('event_title') or 'BLU Event'}  "
+            f"(Start: {self._event_start_date(snapshot)})"
+        )
 
         page = [{
             "component": "VAlert",
             "props": {
                 "type": "info",
                 "variant": "tonal",
-                "title": snapshot.get("event_title") or "BLU Event",
-                "text": f"最后检查：{snapshot.get('updated_at') or '—'}\n活动地址：{event_url}\n本页只读取本地缓存，不会访问 BLU。",
+                "title": event_heading,
+                "class": "mb-4",
             },
         }, {
             "component": "VRow",
@@ -705,23 +731,23 @@ class BLUEventClaim(_PluginBase):
             "component": "VRow",
             "content": [{
                 "component": "VCol",
-                "props": {"cols": 12},
+                "props": {"cols": 12, "md": 6},
                 "content": [{
-                    "component": "VDataTableVirtual",
+                    "component": "VDataTable",
                     "props": {
                         "headers": [
                             {"title": "日期", "key": "date"},
                             {"title": "状态", "key": "status"},
                             {"title": "奖励 / BLU 原始提示", "key": "detail"},
                         ],
-                        "items": day_items,
-                        "height": "36rem",
+                        "items": items,
+                        "items-per-page": -1,
+                        "hide-default-footer": True,
                         "density": "compact",
-                        "fixed-header": True,
                         "hover": True,
                     },
                 }],
-            }],
+            } for items in day_columns if items],
         }, {
             "component": "div",
             "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"},
@@ -732,7 +758,7 @@ class BLUEventClaim(_PluginBase):
                 "component": "VCol",
                 "props": {"cols": 12},
                 "content": [{
-                    "component": "VDataTableVirtual",
+                    "component": "VDataTable",
                     "props": {
                         "headers": [
                             {"title": "时间", "key": "time"},
@@ -741,15 +767,47 @@ class BLUEventClaim(_PluginBase):
                             {"title": "说明", "key": "message"},
                         ],
                         "items": records,
-                        "height": "24rem",
+                        "items-per-page": -1,
+                        "hide-default-footer": True,
                         "density": "compact",
-                        "fixed-header": True,
                         "hover": True,
                     },
                 }],
             }],
         }])
         return page
+
+    @staticmethod
+    def _event_start_date(snapshot: Dict[str, Any]) -> str:
+        """根据首个活动日期和缓存时间补全年份。"""
+        days = snapshot.get("days") or []
+        first_date = days[0].get("date", "") if days else ""
+        match = re.fullmatch(r"([A-Za-z]{3})\s+(\d{1,2})", first_date.strip())
+        if not match:
+            return "—"
+
+        months = {
+            "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+        }
+        month = months.get(match.group(1).lower())
+        if not month:
+            return "—"
+
+        updated_at = snapshot.get("updated_at") or ""
+        try:
+            checked = datetime.datetime.strptime(updated_at[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            checked = datetime.date.today()
+        try:
+            candidates = [
+                datetime.date(checked.year + offset, month, int(match.group(2)))
+                for offset in (-1, 0, 1)
+            ]
+        except ValueError:
+            return "—"
+        start = min(candidates, key=lambda value: abs((value - checked).days))
+        return start.strftime("%Y/%m/%d")
 
     def get_command(self) -> List[Dict[str, Any]]:
         """本插件不注册远程命令。"""
