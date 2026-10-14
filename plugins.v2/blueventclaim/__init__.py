@@ -26,7 +26,7 @@ class BLUEventClaim(_PluginBase):
     plugin_name = "BLU活动奖励自动领取"
     plugin_desc = "通过 BLU 网页接口自动领取当天 Event 奖励"
     plugin_icon = "https://blutopia.cc/favicon.svg"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "blueventclaim_"
@@ -629,16 +629,74 @@ class BLUEventClaim(_PluginBase):
             if item.get("event_url") == event_url
             or (not item.get("event_url") and event_url == self.DEFAULT_EVENT_URL)
         ][:10]
-        if not snapshot:
-            return [{
+        latest_record = records[0] if records else None
+        if latest_record:
+            latest_status = latest_record.get("status") or "状态未知"
+            latest_detail = " · ".join(filter(None, [
+                latest_record.get("time"),
+                latest_record.get("message"),
+                f"奖励：{latest_record.get('reward')}" if latest_record.get("reward") else "",
+            ]))
+            latest_alert = {
                 "component": "VAlert",
                 "props": {
-                    "type": "info",
+                    "type": "error" if latest_status == "失败" else "success",
                     "variant": "tonal",
-                    "title": "暂无当前活动缓存",
-                    "text": f"活动地址：{event_url}\n请等待定时任务，或在配置中执行一次立即运行。打开本页不会访问 BLU。",
+                    "title": f"最近执行：{latest_status}",
+                    "text": latest_detail,
+                    "class": "mb-4",
                 },
-            }]
+            }
+        else:
+            latest_alert = {
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "title": "尚未执行",
+                    "text": "勾选“立即运行一次”并保存配置后，任务会在约 3 秒后执行。",
+                    "class": "mb-4",
+                },
+            }
+
+        history_components = [{
+            "component": "div",
+            "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"},
+            "text": "执行历史",
+        }, {
+            "component": "VRow",
+            "content": [{
+                "component": "VCol",
+                "props": {"cols": 12},
+                "content": [{
+                    "component": "VDataTable",
+                    "props": {
+                        "headers": [
+                            {"title": "时间", "key": "time"},
+                            {"title": "结果", "key": "status"},
+                            {"title": "本次奖励", "key": "reward"},
+                            {"title": "说明", "key": "message"},
+                        ],
+                        "items": records,
+                        "items-per-page": -1,
+                        "hide-default-footer": True,
+                        "density": "compact",
+                        "hover": True,
+                    },
+                }],
+            }],
+        }]
+        if not snapshot:
+            return [latest_alert, {
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "title": "暂无每日状态缓存",
+                    "text": "最近一次读取尚未产生有效的活动页面；具体结果请查看上方提示和下方执行历史。",
+                    "class": "mb-4",
+                },
+            }, *history_components]
 
         summary = [
             ("活动总天数", snapshot.get("total_days", 0), "info"),
@@ -675,7 +733,7 @@ class BLUEventClaim(_PluginBase):
                 "title": event_heading,
                 "class": "mb-4",
             },
-        }, {
+        }, latest_alert, {
             "component": "VRow",
             "content": [{
                 "component": "VCol",
@@ -748,33 +806,8 @@ class BLUEventClaim(_PluginBase):
                     },
                 }],
             } for items in day_columns if items],
-        }, {
-            "component": "div",
-            "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"},
-            "text": "执行历史",
-        }, {
-            "component": "VRow",
-            "content": [{
-                "component": "VCol",
-                "props": {"cols": 12},
-                "content": [{
-                    "component": "VDataTable",
-                    "props": {
-                        "headers": [
-                            {"title": "时间", "key": "time"},
-                            {"title": "结果", "key": "status"},
-                            {"title": "本次奖励", "key": "reward"},
-                            {"title": "说明", "key": "message"},
-                        ],
-                        "items": records,
-                        "items-per-page": -1,
-                        "hide-default-footer": True,
-                        "density": "compact",
-                        "hover": True,
-                    },
-                }],
-            }],
         }])
+        page.extend(history_components)
         return page
 
     @staticmethod

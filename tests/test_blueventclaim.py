@@ -1,5 +1,6 @@
 """Pure parsing tests for the MoviePilot v2 BLU event plugin."""
 
+import datetime
 import importlib.util
 import sys
 import types
@@ -30,11 +31,29 @@ class _FakeCronTrigger:
         return cls(expression)
 
 
-_module("pytz", timezone=lambda value: value)
+class _FakeScheduler:
+    def __init__(self, *args, **kwargs):
+        self.jobs = []
+        self.running = False
+
+    def add_job(self, **kwargs):
+        self.jobs.append(kwargs)
+
+    def start(self):
+        self.running = True
+
+    def remove_all_jobs(self):
+        self.jobs.clear()
+
+    def shutdown(self):
+        self.running = False
+
+
+_module("pytz", timezone=lambda value: datetime.timezone.utc)
 _module("requests", Session=_Dummy, Response=_Dummy)
 _module("apscheduler")
 _module("apscheduler.schedulers")
-_module("apscheduler.schedulers.background", BackgroundScheduler=_Dummy)
+_module("apscheduler.schedulers.background", BackgroundScheduler=_FakeScheduler)
 _module("apscheduler.triggers")
 _module("apscheduler.triggers.cron", CronTrigger=_FakeCronTrigger)
 _module("app")
@@ -150,6 +169,24 @@ class BLUEventClaimParserTest(unittest.TestCase):
         self.assertEqual(plugin._random_delay, 60)
         plugin.init_plugin({"random_delay": -1})
         self.assertEqual(plugin._random_delay, 0)
+
+    def test_immediate_run_is_scheduled_after_saving_config(self):
+        plugin = BLUEventClaim()
+        plugin._scheduler = None
+        saved = {}
+        plugin.update_config = lambda config: saved.update(config)
+
+        before = datetime.datetime.now(tz=datetime.timezone.utc)
+        plugin.init_plugin({"onlyonce": True})
+
+        self.assertTrue(plugin._scheduler.running)
+        self.assertEqual(len(plugin._scheduler.jobs), 1)
+        job = plugin._scheduler.jobs[0]
+        self.assertEqual(job["func"].__name__, "_claim_reward")
+        self.assertGreaterEqual((job["run_date"] - before).total_seconds(), 2)
+        self.assertLessEqual((job["run_date"] - before).total_seconds(), 4)
+        self.assertFalse(saved["onlyonce"])
+        plugin.stop_service()
 
     def test_claim_flow_verifies_the_result_page(self):
         unclaimed = """
@@ -267,6 +304,30 @@ class BLUEventClaimParserTest(unittest.TestCase):
             self.assertNotIn("fixed-header", table["props"])
             self.assertEqual(table["props"]["items-per-page"], -1)
             self.assertTrue(table["props"]["hide-default-footer"])
+
+    def test_failed_immediate_run_is_visible_without_daily_cache(self):
+        current_url = "https://blutopia.cc/giveaways/4"
+        plugin = BLUEventClaim()
+        plugin._event_url = current_url
+        stored = {
+            "event_snapshots": {},
+            "claim_logs": [{
+                "event_url": current_url,
+                "time": "2026-10-14 10:30:00",
+                "status": "失败",
+                "reward": "",
+                "message": "BLU Cookie 已失效",
+            }],
+        }
+        plugin.get_data = lambda key: stored.get(key)
+
+        page = plugin.get_page()
+        rendered = str(page)
+        self.assertIn("最近执行：失败", rendered)
+        self.assertIn("BLU Cookie 已失效", rendered)
+        self.assertIn("暂无每日状态缓存", rendered)
+        self.assertIn("执行历史", rendered)
+        self.assertIn("VDataTable", rendered)
 
 
 if __name__ == "__main__":
