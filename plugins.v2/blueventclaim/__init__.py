@@ -128,6 +128,8 @@ class BLUEventClaim(_PluginBase):
             "status": result["status"],
             "reward": result.get("reward", ""),
             "message": result.get("message", ""),
+            "total_days": result.get("total_days"),
+            "claimed_days": result.get("claimed_days"),
         }
         history = self.get_data("claim_logs") or []
         self.save_data("claim_logs", (history + [record])[-self.MAX_HISTORY:])
@@ -140,10 +142,13 @@ class BLUEventClaim(_PluginBase):
 
         if self._notify and record["status"] in ("成功", "失败"):
             reward_text = f"\n奖励：{record['reward']}" if record["reward"] else ""
+            progress_text = ""
+            if record["total_days"] is not None and record["claimed_days"] is not None:
+                progress_text = f"\n活动进度：{record['claimed_days']} / {record['total_days']} 天"
             self.post_message(
                 mtype=NotificationType.SiteMessage,
                 title=f"【BLU活动奖励】{record['status']}",
-                text=f"{record['message']}{reward_text}",
+                text=f"{record['message']}{reward_text}{progress_text}",
             )
 
     def _do_claim(self) -> Dict[str, str]:
@@ -179,12 +184,14 @@ class BLUEventClaim(_PluginBase):
             return {"status": "失败", "message": "BLU Cookie 已失效，请先在站点设置中更新"}
 
         page_state = self._page_state(page.text)
+        progress = self._event_progress(page.text)
         if page_state["claimed"]:
             reward = self._claimed_reward(page.text)
             return {
                 "status": "已领取",
                 "reward": reward,
                 "message": "今天的活动奖励已经领取，无需重复提交",
+                **progress,
             }
 
         csrf_token = self._csrf_token(page.text)
@@ -194,7 +201,7 @@ class BLUEventClaim(_PluginBase):
         claim_url = self._claim_url(page.text, event_url)
         if not claim_url:
             detail = "今天尚未开放领取" if page_state["future"] else "活动页未找到领取表单"
-            return {"status": "失败", "message": detail}
+            return {"status": "失败", "message": detail, **progress}
 
         response = request.post_res(
             url=claim_url,
@@ -222,10 +229,12 @@ class BLUEventClaim(_PluginBase):
             return {"status": "失败", "message": "领取请求已提交，但页面未显示今天已领取"}
 
         reward = self._claimed_reward(verify_page.text)
+        progress = self._event_progress(verify_page.text)
         return {
             "status": "成功",
             "reward": reward,
             "message": "今天的 BLU 活动奖励领取成功",
+            **progress,
         }
 
     @staticmethod
@@ -297,6 +306,25 @@ class BLUEventClaim(_PluginBase):
         text = re.sub(r"\s+", " ", html.unescape(text)).strip()
         text = re.sub(r"^[A-Z][a-z]{2}\s+\d{1,2}\s*", "", text)
         return text
+
+    @staticmethod
+    def _event_progress(page_html: str) -> Dict[str, int]:
+        """按活动奖励卡片统计总天数与已领取天数。"""
+        articles = re.findall(
+            r'<article\b[^>]*class=["\'][^"\']*events__prize[^"\']*["\'][^>]*>'
+            r'(?:(?!</article>).)*</article>',
+            page_html or "",
+            re.I | re.S,
+        )
+        claimed_days = sum(
+            bool(re.search(
+                r"events__prize-winnings-list|events__prize-icon--today-claimed",
+                article,
+                re.I,
+            ))
+            for article in articles
+        )
+        return {"total_days": len(articles), "claimed_days": claimed_days}
 
     @staticmethod
     def _is_login_page(response: requests.Response) -> bool:
@@ -393,7 +421,13 @@ class BLUEventClaim(_PluginBase):
     def get_page(self) -> List[dict]:
         """展示领取统计和最近记录。"""
         records = list(reversed(self.get_data("claim_logs") or []))
+        latest_progress = next(
+            (item for item in records if item.get("total_days") is not None),
+            {},
+        )
         summary = [
+            ("活动总天数", latest_progress.get("total_days", 0), "info"),
+            ("已领取天数", latest_progress.get("claimed_days", 0), "success"),
             ("总执行", len(records), "info"),
             ("领取成功", sum(item.get("status") == "成功" for item in records), "success"),
             ("已领取跳过", sum(item.get("status") == "已领取" for item in records), "warning"),

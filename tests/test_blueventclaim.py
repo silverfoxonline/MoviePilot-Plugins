@@ -58,6 +58,10 @@ class BLUEventClaimParserTest(unittest.TestCase):
         self.assertTrue(BLUEventClaim._page_state(page)["claimed"])
         self.assertEqual(BLUEventClaim._claimed_reward(page), "8924 BON")
         self.assertEqual(BLUEventClaim._csrf_token(page), "token-value")
+        self.assertEqual(
+            BLUEventClaim._event_progress(page),
+            {"total_days": 1, "claimed_days": 1},
+        )
 
     def test_claim_form_is_preferred(self):
         page = '<form action="/giveaways/4/claims" method="POST"></form>'
@@ -114,6 +118,8 @@ class BLUEventClaimParserTest(unittest.TestCase):
         result = plugin._do_claim()
         self.assertEqual(result["status"], "成功")
         self.assertEqual(result["reward"], "8924 BON")
+        self.assertEqual(result["total_days"], 1)
+        self.assertEqual(result["claimed_days"], 1)
 
 
 if __name__ == "__main__":
