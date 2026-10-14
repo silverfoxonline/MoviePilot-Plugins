@@ -61,7 +61,12 @@ _module("app.core")
 _module("app.core.config", settings=types.SimpleNamespace(TZ="Asia/Shanghai", USER_AGENT="test", PROXY=None))
 _module("app.db")
 _module("app.db.site_oper", SiteOper=_Dummy)
-_module("app.log", logger=_Dummy())
+_module("app.log", logger=types.SimpleNamespace(
+    info=lambda *args: None,
+    error=lambda *args: None,
+    warning=lambda *args: None,
+    exception=lambda *args: None,
+))
 _module("app.plugins", _PluginBase=object)
 _module("app.schemas")
 _module("app.schemas.types", NotificationType=types.SimpleNamespace(SiteMessage="site"))
@@ -133,6 +138,50 @@ class BLUEventClaimParserTest(unittest.TestCase):
             "上传量": "100 GiB",
             "Mystery Boxes": "2",
         })
+
+    def test_cross_month_days_switch_only_when_both_months_are_cached(self):
+        days = [
+            {"date": "Oct 31", "status": "已领取"},
+            {"date": "Nov 1", "status": "待开放"},
+        ]
+        self.assertEqual(BLUEventClaim._visible_days(days, "Oct"), days[:1])
+        self.assertEqual(BLUEventClaim._visible_days(days, "Nov"), days[1:])
+        self.assertEqual(BLUEventClaim._visible_days(days[:1], "Nov"), days[:1])
+
+    def test_same_event_keeps_previous_month_rewards_when_page_changes(self):
+        event_url = "https://blutopia.cc/giveaways/4"
+        stored = {}
+        plugin = BLUEventClaim()
+        plugin._event_url = event_url
+        plugin._notify = False
+        plugin.get_data = lambda key: stored.get(key)
+        plugin.save_data = lambda key, value: stored.__setitem__(key, value)
+        results = [{
+            "event_url": event_url,
+            "event_title": "Long Event",
+            "status": "已领取",
+            "reward": "100 BON",
+            "message": "已领取",
+            "days": [{"date": "Oct 31", "status": "已领取", "rewards": ["100 BON"]}],
+        }, {
+            "event_url": event_url,
+            "event_title": "Long Event",
+            "status": "成功",
+            "reward": "50 BON",
+            "message": "领取成功",
+            "days": [{"date": "Nov 1", "status": "已领取", "rewards": ["50 BON"]}],
+        }]
+        plugin._do_claim = lambda: results.pop(0)
+
+        plugin._claim_reward()
+        plugin._claim_reward()
+
+        snapshot = stored["event_snapshots"][event_url]
+        self.assertEqual(snapshot["total_days"], 2)
+        self.assertEqual(snapshot["claimed_days"], 2)
+        self.assertEqual([day["date"] for day in snapshot["days"]], ["Oct 31", "Nov 1"])
+        self.assertEqual(snapshot["reward_totals"][0]["display"], "150")
+        self.assertEqual(stored["claim_logs"][-1]["claimed_days"], 2)
 
     def test_claim_form_is_preferred(self):
         page = '<form action="/giveaways/4/claims" method="POST"></form>'
@@ -258,9 +307,9 @@ class BLUEventClaimParserTest(unittest.TestCase):
                     "days": [
                         {
                             "date": f"Oct {day}",
-                            "status": "已领取" if day == 14 else "待开放",
+                            "status": "已领取" if day == 14 else "已过期未领" if day == 13 else "待开放",
                             "rewards": ["8924 BON"] if day == 14 else [],
-                            "message": "8924 BON" if day == 14 else "Check back later!",
+                            "message": "8924 BON" if day == 14 else "Expired" if day == 13 else "Check back later!",
                         }
                         for day in range(13, 32)
                     ],
@@ -282,7 +331,8 @@ class BLUEventClaimParserTest(unittest.TestCase):
 
         page = plugin.get_page()
         rendered = str(page)
-        self.assertIn("Current Event  (Start: 2026/10/13)", rendered)
+        self.assertEqual(page[0]["component"], "div")
+        self.assertEqual(page[0]["text"], "🎉 Current Event (Start: 2026/10/13)")
         self.assertIn("8,924", rendered)
         self.assertNotIn("Other Event", rendered)
         self.assertNotIn("最后检查", rendered)
@@ -300,8 +350,16 @@ class BLUEventClaimParserTest(unittest.TestCase):
         tables = [item for item in components(page) if item.get("component") == "VTable"]
         self.assertEqual([len(item["content"][1]["content"]) for item in tables], [10, 9, 10])
         self.assertEqual(
+            [cell["text"] for cell in tables[0]["content"][1]["content"][0]["content"]],
+            ["Oct 13", "⛔ 已过期未领"],
+        )
+        self.assertEqual(
             [cell["text"] for cell in tables[0]["content"][1]["content"][1]["content"]],
-            ["Oct 14", "✅ 已领取", "8924 BON"],
+            ["Oct 14", "✅ 已领取 8924 BON"],
+        )
+        self.assertEqual(
+            [cell["text"] for cell in tables[0]["content"][1]["content"][2]["content"]],
+            ["Oct 15", "⏳ 待开放"],
         )
         self.assertEqual(
             [cell["text"] for cell in tables[2]["content"][1]["content"][0]["content"]],
@@ -310,6 +368,17 @@ class BLUEventClaimParserTest(unittest.TestCase):
         for table in tables:
             self.assertNotIn("height", table["props"])
             self.assertNotIn("fixed-header", table["props"])
+
+        stored["event_snapshots"][current_url]["days"] = [
+            {"date": f"Oct {day}", "status": "待开放"} for day in range(1, 32)
+        ]
+        month_tables = [
+            item for item in components(plugin.get_page()) if item.get("component") == "VTable"
+        ]
+        self.assertEqual(
+            [len(item["content"][1]["content"]) for item in month_tables],
+            [10, 10, 11, 10],
+        )
 
     def test_failed_immediate_run_is_visible_without_daily_cache(self):
         current_url = "https://blutopia.cc/giveaways/4"

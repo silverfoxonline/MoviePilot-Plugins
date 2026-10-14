@@ -26,7 +26,7 @@ class BLUEventClaim(_PluginBase):
     plugin_name = "BLU活动奖励自动领取"
     plugin_desc = "通过 BLU 网页接口自动领取当天 Event 奖励"
     plugin_icon = "https://blutopia.cc/favicon.svg"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "blueventclaim_"
@@ -141,26 +141,28 @@ class BLUEventClaim(_PluginBase):
             "total_days": result.get("total_days"),
             "claimed_days": result.get("claimed_days"),
         }
-        history = self.get_data("claim_logs") or []
-        self.save_data("claim_logs", (history + [record])[-self.MAX_HISTORY:])
-
         if result.get("days") is not None:
             snapshots = self.get_data("event_snapshots") or {}
+            previous = snapshots.get(record["event_url"]) or {}
+            merged_days = list({
+                day["date"]: day
+                for day in (previous.get("days") or []) + result["days"]
+            }.values())
+            progress = self._summarize_days(merged_days)
+            record["total_days"] = progress["total_days"]
+            record["claimed_days"] = progress["claimed_days"]
             snapshots[record["event_url"]] = {
                 "event_url": record["event_url"],
                 "event_title": result.get("event_title", "BLU Event"),
                 "updated_at": record["time"],
-                "total_days": result.get("total_days", 0),
-                "claimed_days": result.get("claimed_days", 0),
-                "expired_days": result.get("expired_days", 0),
-                "future_days": result.get("future_days", 0),
-                "claimable_days": result.get("claimable_days", 0),
-                "reward_totals": result.get("reward_totals", []),
-                "days": result.get("days", []),
+                **progress,
             }
             if len(snapshots) > self.MAX_EVENT_SNAPSHOTS:
                 snapshots = dict(list(snapshots.items())[-self.MAX_EVENT_SNAPSHOTS:])
             self.save_data("event_snapshots", snapshots)
+
+        history = self.get_data("claim_logs") or []
+        self.save_data("claim_logs", (history + [record])[-self.MAX_HISTORY:])
 
         log_message = f"[BLUEventClaim] {record['status']}: {record['message']}"
         if record["status"] == "失败":
@@ -351,12 +353,16 @@ class BLUEventClaim(_PluginBase):
     def _event_progress(cls, page_html: str) -> Dict[str, Any]:
         """解析活动名称、逐日状态和动态奖励汇总。"""
         days = cls._event_days(page_html)
+        return {"event_title": cls._event_title(page_html), **cls._summarize_days(days)}
+
+    @classmethod
+    def _summarize_days(cls, days: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """汇总当前活动已缓存的所有日期。"""
         status_counts = {
             status: sum(day["status"] == status for day in days)
             for status in ("已领取", "已过期未领", "待开放", "今日待领取")
         }
         return {
-            "event_title": cls._event_title(page_html),
             "total_days": len(days),
             "claimed_days": status_counts["已领取"],
             "expired_days": status_counts["已过期未领"],
@@ -702,26 +708,26 @@ class BLUEventClaim(_PluginBase):
             "待开放": "⏳ 待开放",
             "状态未知": "❔ 状态未知",
         }
-        day_items = [{
-            "date": day.get("date", "未知日期"),
-            "status": status_icons.get(day.get("status"), day.get("status", "状态未知")),
-            "detail": " / ".join(day.get("rewards") or []) or day.get("message") or "—",
-        } for day in snapshot.get("days") or []]
-        day_split = (len(day_items) + 1) // 2
-        day_columns = [day_items[:day_split], day_items[day_split:]]
+        day_items = []
+        current_month = datetime.datetime.now(pytz.timezone(settings.TZ)).strftime("%b")
+        for day in self._visible_days(snapshot.get("days") or [], current_month):
+            status = day.get("status", "状态未知")
+            status_text = status_icons.get(status, status)
+            if status == "已领取":
+                reward = " / ".join(day.get("rewards") or []) or day.get("message") or ""
+                if reward:
+                    status_text += f" {reward}"
+            day_items.append({"date": day.get("date", "未知日期"), "status": status_text})
+        day_columns = [day_items[:10], day_items[10:20], day_items[20:]]
         event_heading = (
-            f"{snapshot.get('event_title') or 'BLU Event'}  "
+            f"{snapshot.get('event_title') or 'BLU Event'} "
             f"(Start: {self._event_start_date(snapshot)})"
         )
 
         page = [{
-            "component": "VAlert",
-            "props": {
-                "type": "info",
-                "variant": "tonal",
-                "title": event_heading,
-                "class": "mb-4",
-            },
+            "component": "div",
+            "props": {"class": "text-h5 font-weight-bold mt-2 mb-4"},
+            "text": f"🎉 {event_heading}",
         }, latest_alert, {
             "component": "VRow",
             "content": [{
@@ -778,16 +784,29 @@ class BLUEventClaim(_PluginBase):
             "component": "VRow",
             "content": [{
                 "component": "VCol",
-                "props": {"cols": 12, "md": 6},
+                "props": {"cols": 12, "md": 4},
                 "content": [self._display_table(
-                    ("日期", "状态", "奖励 / BLU 原始提示"),
-                    ("date", "status", "detail"),
+                    ("日期", "状态 / 奖励"),
+                    ("date", "status"),
                     items,
                 )],
             } for items in day_columns if items],
         }])
         page.extend(history_components)
         return page
+
+    @staticmethod
+    def _visible_days(days: List[dict], current_month: str) -> List[dict]:
+        """跨月活动只展示当前月；单月缓存仍照原样展示。"""
+        def month(day: dict) -> str:
+            match = re.match(r"([A-Za-z]{3})\s+\d{1,2}\b", day.get("date") or "")
+            return match.group(1).lower() if match else ""
+
+        months = {month(day) for day in days}
+        months.discard("")
+        if len(months) > 1 and current_month.lower() in months:
+            return [day for day in days if month(day) == current_month.lower()]
+        return days
 
     @staticmethod
     def _display_table(headers: tuple, keys: tuple, items: List[dict]) -> dict:
