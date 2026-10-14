@@ -1,4 +1,16 @@
 {
+  "BLUEventClaim": {
+    "name": "BLU活动奖励自动领取",
+    "description": "使用手动填写或MoviePilot站点配置中的BLU Cookie，通过网页接口自动领取当天Event奖励。",
+    "labels": "站点,签到,BLU",
+    "version": "1.0.0",
+    "icon": "https://blutopia.cc/favicon.svg",
+    "author": "silverfoxonline",
+    "level": 1,
+    "history": {
+      "v1.0.0": "支持自动领取BLU活动奖励、结果验证、通知、统计和历史记录"
+    }
+  },
   "DownloadSiteTagCustom": {
     "name": "下载任务分类与标签-改版",
     "description": "基于下载任务分类与标签 2.6，统一 Aither、BeyondHD、Orpheus、Blutopia 和 GazelleGames 的站点标签名。",
