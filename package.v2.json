@@ -8,7 +8,7 @@
     "author": "silverfoxonline",
     "level": 1,
     "history": {
-      "v1.0.0": "支持自动领取BLU活动奖励、结果验证、通知、活动进度统计和历史记录"
+      "v1.0.0": "支持可配置活动地址、自动领取与通知、逐日状态、动态奖励汇总、本地缓存统计和历史记录"
     }
   },
   "DownloadSiteTagCustom": {

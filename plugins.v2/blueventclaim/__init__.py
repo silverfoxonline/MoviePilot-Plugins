@@ -37,6 +37,7 @@ class BLUEventClaim(_PluginBase):
     DEFAULT_CRON = "5 9 * * *"
     REQUEST_TIMEOUT = 30
     MAX_HISTORY = 100
+    MAX_EVENT_SNAPSHOTS = 20
 
     _enabled = False
     _onlyonce = False
@@ -125,6 +126,7 @@ class BLUEventClaim(_PluginBase):
 
         record = {
             "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "event_url": result.get("event_url", self._event_url),
             "status": result["status"],
             "reward": result.get("reward", ""),
             "message": result.get("message", ""),
@@ -133,6 +135,24 @@ class BLUEventClaim(_PluginBase):
         }
         history = self.get_data("claim_logs") or []
         self.save_data("claim_logs", (history + [record])[-self.MAX_HISTORY:])
+
+        if result.get("days") is not None:
+            snapshots = self.get_data("event_snapshots") or {}
+            snapshots[record["event_url"]] = {
+                "event_url": record["event_url"],
+                "event_title": result.get("event_title", "BLU Event"),
+                "updated_at": record["time"],
+                "total_days": result.get("total_days", 0),
+                "claimed_days": result.get("claimed_days", 0),
+                "expired_days": result.get("expired_days", 0),
+                "future_days": result.get("future_days", 0),
+                "claimable_days": result.get("claimable_days", 0),
+                "reward_totals": result.get("reward_totals", []),
+                "days": result.get("days", []),
+            }
+            if len(snapshots) > self.MAX_EVENT_SNAPSHOTS:
+                snapshots = dict(list(snapshots.items())[-self.MAX_EVENT_SNAPSHOTS:])
+            self.save_data("event_snapshots", snapshots)
 
         log_message = f"[BLUEventClaim] {record['status']}: {record['message']}"
         if record["status"] == "失败":
@@ -151,8 +171,8 @@ class BLUEventClaim(_PluginBase):
                 text=f"{record['message']}{reward_text}{progress_text}",
             )
 
-    def _do_claim(self) -> Dict[str, str]:
-        """读取活动页、提交领取请求，并再次读取页面验证结果。"""
+    def _do_claim(self) -> Dict[str, Any]:
+        """读取活动页并在需要时提交一次领取请求。"""
         event_url = self._normalized_event_url(self._event_url)
         if not event_url:
             return {"status": "失败", "message": "活动地址必须是 blutopia.cc 的 HTTPS 地址"}
@@ -188,6 +208,7 @@ class BLUEventClaim(_PluginBase):
         if page_state["claimed"]:
             reward = self._claimed_reward(page.text)
             return {
+                "event_url": event_url,
                 "status": "已领取",
                 "reward": reward,
                 "message": "今天的活动奖励已经领取，无需重复提交",
@@ -196,12 +217,17 @@ class BLUEventClaim(_PluginBase):
 
         csrf_token = self._csrf_token(page.text)
         if not csrf_token:
-            return {"status": "失败", "message": "活动页未找到 CSRF token"}
+            return {
+                "event_url": event_url,
+                "status": "失败",
+                "message": "活动页未找到 CSRF token",
+                **progress,
+            }
 
         claim_url = self._claim_url(page.text, event_url)
         if not claim_url:
             detail = "今天尚未开放领取" if page_state["future"] else "活动页未找到领取表单"
-            return {"status": "失败", "message": detail, **progress}
+            return {"event_url": event_url, "status": "失败", "message": detail, **progress}
 
         response = request.post_res(
             url=claim_url,
@@ -217,20 +243,26 @@ class BLUEventClaim(_PluginBase):
         )
         error = self._response_error(response, "提交领取请求")
         if error:
-            return error
+            return {"event_url": event_url, **error, **progress}
         if self._is_login_page(response):
-            return {"status": "失败", "message": "领取时登录失效，请更新 BLU Cookie"}
+            return {
+                "event_url": event_url,
+                "status": "失败",
+                "message": "领取时登录失效，请更新 BLU Cookie",
+                **progress,
+            }
+        if not self._page_state(response.text)["claimed"]:
+            return {
+                "event_url": event_url,
+                "status": "失败",
+                "message": "领取请求已提交，但返回页面未显示今天已领取",
+                **progress,
+            }
 
-        verify_page = request.get_res(url=event_url)
-        error = self._response_error(verify_page, "验证领取结果")
-        if error:
-            return error
-        if not self._page_state(verify_page.text)["claimed"]:
-            return {"status": "失败", "message": "领取请求已提交，但页面未显示今天已领取"}
-
-        reward = self._claimed_reward(verify_page.text)
-        progress = self._event_progress(verify_page.text)
+        reward = self._claimed_reward(response.text)
+        progress = self._event_progress(response.text)
         return {
+            "event_url": event_url,
             "status": "成功",
             "reward": reward,
             "message": "今天的 BLU 活动奖励领取成功",
@@ -307,24 +339,173 @@ class BLUEventClaim(_PluginBase):
         text = re.sub(r"^[A-Z][a-z]{2}\s+\d{1,2}\s*", "", text)
         return text
 
+    @classmethod
+    def _event_progress(cls, page_html: str) -> Dict[str, Any]:
+        """解析活动名称、逐日状态和动态奖励汇总。"""
+        days = cls._event_days(page_html)
+        status_counts = {
+            status: sum(day["status"] == status for day in days)
+            for status in ("已领取", "已过期未领", "待开放", "今日待领取")
+        }
+        return {
+            "event_title": cls._event_title(page_html),
+            "total_days": len(days),
+            "claimed_days": status_counts["已领取"],
+            "expired_days": status_counts["已过期未领"],
+            "future_days": status_counts["待开放"],
+            "claimable_days": status_counts["今日待领取"],
+            "reward_totals": cls._reward_totals(days),
+            "days": days,
+        }
+
     @staticmethod
-    def _event_progress(page_html: str) -> Dict[str, int]:
-        """按活动奖励卡片统计总天数与已领取天数。"""
+    def _event_title(page_html: str) -> str:
+        """读取活动标题。"""
+        match = re.search(
+            r'<h2\b[^>]*class=["\'][^"\']*panel__heading[^"\']*["\'][^>]*>(.*?)</h2>',
+            page_html or "",
+            re.I | re.S,
+        )
+        return BLUEventClaim._plain_text(match.group(1)) if match else "BLU Event"
+
+    @staticmethod
+    def _event_days(page_html: str) -> List[Dict[str, Any]]:
+        """把每个活动奖励卡片转换为日期、状态、奖励和原始提示。"""
         articles = re.findall(
             r'<article\b[^>]*class=["\'][^"\']*events__prize[^"\']*["\'][^>]*>'
             r'(?:(?!</article>).)*</article>',
             page_html or "",
             re.I | re.S,
         )
-        claimed_days = sum(
-            bool(re.search(
+        days = []
+        for article in articles:
+            date_match = re.search(r"<h3\b[^>]*>(.*?)</h3>", article, re.I | re.S)
+            date_text = BLUEventClaim._plain_text(date_match.group(1)) if date_match else "未知日期"
+            messages = [
+                BLUEventClaim._plain_text(content)
+                for _, content in re.findall(
+                    r'<([a-z0-9]+)\b[^>]*class=["\'][^"\']*events__prize-message'
+                    r'[^"\']*["\'][^>]*>(.*?)</\1>',
+                    article,
+                    re.I | re.S,
+                )
+            ]
+            messages = [message for message in messages if message]
+            claimed = bool(re.search(
                 r"events__prize-winnings-list|events__prize-icon--today-claimed",
                 article,
                 re.I,
             ))
-            for article in articles
+            if claimed:
+                status = "已领取"
+                rewards = [
+                    message for message in messages
+                    if message.lower() not in {"expired", "check back later!"}
+                ]
+            elif re.search(r"events__prize-icon--today(?!-claimed)", article, re.I):
+                status = "今日待领取"
+                rewards = []
+            elif re.search(r"events__prize-icon--past|\bExpired\b", article, re.I):
+                status = "已过期未领"
+                rewards = []
+            elif re.search(r"events__prize-icon--future|Check back later", article, re.I):
+                status = "待开放"
+                rewards = []
+            else:
+                status = "状态未知"
+                rewards = []
+            days.append({
+                "date": date_text,
+                "status": status,
+                "rewards": rewards,
+                "message": " / ".join(messages),
+            })
+        return days
+
+    @staticmethod
+    def _reward_totals(days: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """汇总已领取日期中的已知及未知奖励类型。"""
+        totals: Dict[str, Dict[str, Any]] = {}
+        for day in days:
+            if day.get("status") != "已领取":
+                continue
+            for reward in day.get("rewards") or []:
+                parsed = BLUEventClaim._parse_reward(reward)
+                current = totals.setdefault(parsed["key"], {
+                    "key": parsed["key"],
+                    "label": parsed["label"],
+                    "kind": parsed["kind"],
+                    "value": 0,
+                })
+                current["value"] += parsed["value"]
+
+        priority = {"bon": 0, "fl_tokens": 1, "upload": 2}
+        result = sorted(totals.values(), key=lambda item: (priority.get(item["key"], 99), item["label"]))
+        for item in result:
+            if item["kind"] == "bytes":
+                item["display"] = BLUEventClaim._format_bytes(item["value"])
+            elif item["kind"] == "count":
+                item["display"] = f"× {int(item['value'])}"
+            else:
+                item["display"] = BLUEventClaim._format_number(item["value"])
+        return result
+
+    @staticmethod
+    def _parse_reward(reward: str) -> Dict[str, Any]:
+        """识别常见奖励；未知奖励按名称动态分组。"""
+        text = re.sub(r"\s+", " ", html.unescape(reward or "")).strip()
+        number = r"([\d,]+(?:\.\d+)?)"
+
+        match = re.fullmatch(number + r"\s*(?:BON|BP|BONUS(?:\s+POINTS?)?)", text, re.I)
+        if match:
+            return {"key": "bon", "label": "BON", "kind": "number", "value": BLUEventClaim._number(match.group(1))}
+
+        match = re.fullmatch(number + r"\s*(?:FL\s*)?(?:TOKENS?|FREELEECH\s+TOKENS?)", text, re.I)
+        if match:
+            return {"key": "fl_tokens", "label": "FL Token", "kind": "number", "value": BLUEventClaim._number(match.group(1))}
+
+        match = re.fullmatch(
+            number + r"\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)(?:\s+UPLOAD)?",
+            text,
+            re.I,
         )
-        return {"total_days": len(articles), "claimed_days": claimed_days}
+        if match:
+            unit = match.group(2).lower()
+            powers = {"kb": 1, "mb": 2, "gb": 3, "tb": 4, "kib": 1, "mib": 2, "gib": 3, "tib": 4}
+            base = 1024 if "i" in unit else 1000
+            value = BLUEventClaim._number(match.group(1)) * (base ** powers[unit])
+            return {"key": "upload", "label": "上传量", "kind": "bytes", "value": value}
+
+        match = re.fullmatch(number + r"\s+(.+)", text)
+        if match:
+            label = re.sub(r"\s+", " ", match.group(2)).strip()
+            key = "other:" + label.casefold()
+            return {"key": key, "label": label, "kind": "number", "value": BLUEventClaim._number(match.group(1))}
+
+        key = "other:" + text.casefold()
+        return {"key": key, "label": text or "其他奖励", "kind": "count", "value": 1}
+
+    @staticmethod
+    def _number(value: str) -> float:
+        return float((value or "0").replace(",", ""))
+
+    @staticmethod
+    def _format_number(value: float) -> str:
+        return f"{int(value):,}" if float(value).is_integer() else f"{value:,.2f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _format_bytes(value: float) -> str:
+        size = float(value)
+        for unit in ("B", "KiB", "MiB", "GiB"):
+            if abs(size) < 1024:
+                return f"{size:,.2f}".rstrip("0").rstrip(".") + f" {unit}"
+            size /= 1024
+        return f"{size:,.2f}".rstrip("0").rstrip(".") + " TiB"
+
+    @staticmethod
+    def _plain_text(value: str) -> str:
+        text = re.sub(r"<[^>]+>", " ", value or "")
+        return re.sub(r"\s+", " ", html.unescape(text)).strip()
 
     @staticmethod
     def _is_login_page(response: requests.Response) -> bool:
@@ -406,7 +587,7 @@ class BLUEventClaim(_PluginBase):
                 "props": {
                     "type": "info",
                     "variant": "tonal",
-                    "text": "插件先读取活动页和 CSRF token，再调用领取接口，最后重新读取页面验证结果。默认每天 09:05 执行。",
+                    "text": "仅定时任务或立即运行时访问 BLU；打开详情页只读取本地缓存。已领取时请求一次，需要领取时请求两次。默认每天 09:05 执行。",
                 },
             }],
         }], {
@@ -419,25 +600,60 @@ class BLUEventClaim(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        """展示领取统计和最近记录。"""
-        records = list(reversed(self.get_data("claim_logs") or []))
-        latest_progress = next(
-            (item for item in records if item.get("total_days") is not None),
-            {},
-        )
-        summary = [
-            ("活动总天数", latest_progress.get("total_days", 0), "info"),
-            ("已领取天数", latest_progress.get("claimed_days", 0), "success"),
-            ("总执行", len(records), "info"),
-            ("领取成功", sum(item.get("status") == "成功" for item in records), "success"),
-            ("已领取跳过", sum(item.get("status") == "已领取" for item in records), "warning"),
-            ("失败", sum(item.get("status") == "失败" for item in records), "error"),
+        """只读取本地缓存，展示当前活动统计、逐日状态和执行历史。"""
+        event_url = self._normalized_event_url(self._event_url) or self._event_url
+        snapshot = (self.get_data("event_snapshots") or {}).get(event_url)
+        all_records = list(reversed(self.get_data("claim_logs") or []))
+        records = [
+            item for item in all_records
+            if item.get("event_url") == event_url
+            or (not item.get("event_url") and event_url == self.DEFAULT_EVENT_URL)
         ]
-        return [{
+        if not snapshot:
+            return [{
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "title": "暂无当前活动缓存",
+                    "text": f"活动地址：{event_url}\n请等待定时任务，或在配置中执行一次立即运行。打开本页不会访问 BLU。",
+                },
+            }]
+
+        summary = [
+            ("活动总天数", snapshot.get("total_days", 0), "info"),
+            ("已领取", snapshot.get("claimed_days", 0), "success"),
+            ("已过期未领", snapshot.get("expired_days", 0), "error"),
+            ("今日待领取", snapshot.get("claimable_days", 0), "warning"),
+            ("待开放", snapshot.get("future_days", 0), "info"),
+        ]
+        reward_totals = snapshot.get("reward_totals") or []
+        status_icons = {
+            "已领取": "✅ 已领取",
+            "已过期未领": "⛔ 已过期未领",
+            "今日待领取": "🎁 今日待领取",
+            "待开放": "⏳ 待开放",
+            "状态未知": "❔ 状态未知",
+        }
+        day_items = [{
+            "date": day.get("date", "未知日期"),
+            "status": status_icons.get(day.get("status"), day.get("status", "状态未知")),
+            "detail": " / ".join(day.get("rewards") or []) or day.get("message") or "—",
+        } for day in snapshot.get("days") or []]
+
+        page = [{
+            "component": "VAlert",
+            "props": {
+                "type": "info",
+                "variant": "tonal",
+                "title": snapshot.get("event_title") or "BLU Event",
+                "text": f"最后检查：{snapshot.get('updated_at') or '—'}\n活动地址：{event_url}\n本页只读取本地缓存，不会访问 BLU。",
+            },
+        }, {
             "component": "VRow",
             "content": [{
                 "component": "VCol",
-                "props": {"cols": 12, "sm": 6, "md": 3},
+                "props": {"cols": 12, "sm": 6, "md": 2},
                 "content": [{
                     "component": "VAlert",
                     "props": {
@@ -449,6 +665,68 @@ class BLUEventClaim(_PluginBase):
                 }],
             } for title, value, color in summary],
         }, {
+            "component": "div",
+            "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"},
+            "text": "奖励总计",
+        }]
+
+        if reward_totals:
+            page.append({
+                "component": "VRow",
+                "content": [{
+                    "component": "VCol",
+                    "props": {"cols": 12, "sm": 6, "md": 3},
+                    "content": [{
+                        "component": "VAlert",
+                        "props": {
+                            "type": "success",
+                            "variant": "tonal",
+                            "title": item.get("label") or "其他奖励",
+                            "text": item.get("display") or "—",
+                        },
+                    }],
+                } for item in reward_totals],
+            })
+        else:
+            page.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "text": "当前活动尚无已领取奖励。",
+                },
+            })
+
+        page.extend([{
+            "component": "div",
+            "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"},
+            "text": "每日状态",
+        }, {
+            "component": "VRow",
+            "content": [{
+                "component": "VCol",
+                "props": {"cols": 12},
+                "content": [{
+                    "component": "VDataTableVirtual",
+                    "props": {
+                        "headers": [
+                            {"title": "日期", "key": "date"},
+                            {"title": "状态", "key": "status"},
+                            {"title": "奖励 / BLU 原始提示", "key": "detail"},
+                        ],
+                        "items": day_items,
+                        "height": "36rem",
+                        "density": "compact",
+                        "fixed-header": True,
+                        "hover": True,
+                    },
+                }],
+            }],
+        }, {
+            "component": "div",
+            "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"},
+            "text": "执行历史",
+        }, {
             "component": "VRow",
             "content": [{
                 "component": "VCol",
@@ -459,18 +737,19 @@ class BLUEventClaim(_PluginBase):
                         "headers": [
                             {"title": "时间", "key": "time"},
                             {"title": "结果", "key": "status"},
-                            {"title": "奖励", "key": "reward"},
+                            {"title": "本次奖励", "key": "reward"},
                             {"title": "说明", "key": "message"},
                         ],
                         "items": records,
-                        "height": "30rem",
+                        "height": "24rem",
                         "density": "compact",
                         "fixed-header": True,
                         "hover": True,
                     },
                 }],
             }],
-        }]
+        }])
+        return page
 
     def get_command(self) -> List[Dict[str, Any]]:
         """本插件不注册远程命令。"""
