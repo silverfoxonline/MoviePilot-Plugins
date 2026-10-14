@@ -26,7 +26,7 @@ class BLUEventClaim(_PluginBase):
     plugin_name = "BLU活动奖励自动领取"
     plugin_desc = "通过 BLU 网页接口自动领取当天 Event 奖励"
     plugin_icon = "https://blutopia.cc/favicon.svg"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "blueventclaim_"
@@ -668,22 +668,11 @@ class BLUEventClaim(_PluginBase):
             "content": [{
                 "component": "VCol",
                 "props": {"cols": 12},
-                "content": [{
-                    "component": "VDataTable",
-                    "props": {
-                        "headers": [
-                            {"title": "时间", "key": "time"},
-                            {"title": "结果", "key": "status"},
-                            {"title": "本次奖励", "key": "reward"},
-                            {"title": "说明", "key": "message"},
-                        ],
-                        "items": records,
-                        "items-per-page": -1,
-                        "hide-default-footer": True,
-                        "density": "compact",
-                        "hover": True,
-                    },
-                }],
+                "content": [self._display_table(
+                    ("时间", "结果", "本次奖励", "说明"),
+                    ("time", "status", "reward", "message"),
+                    records,
+                )],
             }],
         }]
         if not snapshot:
@@ -790,25 +779,39 @@ class BLUEventClaim(_PluginBase):
             "content": [{
                 "component": "VCol",
                 "props": {"cols": 12, "md": 6},
-                "content": [{
-                    "component": "VDataTable",
-                    "props": {
-                        "headers": [
-                            {"title": "日期", "key": "date"},
-                            {"title": "状态", "key": "status"},
-                            {"title": "奖励 / BLU 原始提示", "key": "detail"},
-                        ],
-                        "items": items,
-                        "items-per-page": -1,
-                        "hide-default-footer": True,
-                        "density": "compact",
-                        "hover": True,
-                    },
-                }],
+                "content": [self._display_table(
+                    ("日期", "状态", "奖励 / BLU 原始提示"),
+                    ("date", "status", "detail"),
+                    items,
+                )],
             } for items in day_columns if items],
         }])
         page.extend(history_components)
         return page
+
+    @staticmethod
+    def _display_table(headers: tuple, keys: tuple, items: List[dict]) -> dict:
+        """使用 MP2 插件页面已支持的 VTable 渲染缓存记录。"""
+        return {
+            "component": "VTable",
+            "props": {"density": "compact", "hover": True},
+            "content": [{
+                "component": "thead",
+                "content": [{
+                    "component": "tr",
+                    "content": [{"component": "th", "text": title} for title in headers],
+                }],
+            }, {
+                "component": "tbody",
+                "content": [{
+                    "component": "tr",
+                    "content": [{
+                        "component": "td",
+                        "text": str(item.get(key) or "—"),
+                    } for key in keys],
+                } for item in items],
+            }],
+        }
 
     @staticmethod
     def _event_start_date(snapshot: Dict[str, Any]) -> str:

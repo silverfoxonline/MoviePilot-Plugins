@@ -297,13 +297,19 @@ class BLUEventClaimParserTest(unittest.TestCase):
                 for child in value:
                     yield from components(child)
 
-        tables = [item for item in components(page) if item.get("component") == "VDataTable"]
-        self.assertEqual([len(item["props"]["items"]) for item in tables], [10, 9, 10])
+        tables = [item for item in components(page) if item.get("component") == "VTable"]
+        self.assertEqual([len(item["content"][1]["content"]) for item in tables], [10, 9, 10])
+        self.assertEqual(
+            [cell["text"] for cell in tables[0]["content"][1]["content"][1]["content"]],
+            ["Oct 14", "✅ 已领取", "8924 BON"],
+        )
+        self.assertEqual(
+            [cell["text"] for cell in tables[2]["content"][1]["content"][0]["content"]],
+            ["2026-10-12 09:05:00", "成功", "8924 BON", "领取成功"],
+        )
         for table in tables:
             self.assertNotIn("height", table["props"])
             self.assertNotIn("fixed-header", table["props"])
-            self.assertEqual(table["props"]["items-per-page"], -1)
-            self.assertTrue(table["props"]["hide-default-footer"])
 
     def test_failed_immediate_run_is_visible_without_daily_cache(self):
         current_url = "https://blutopia.cc/giveaways/4"
@@ -327,7 +333,7 @@ class BLUEventClaimParserTest(unittest.TestCase):
         self.assertIn("BLU Cookie 已失效", rendered)
         self.assertIn("暂无每日状态缓存", rendered)
         self.assertIn("执行历史", rendered)
-        self.assertIn("VDataTable", rendered)
+        self.assertIn("VTable", rendered)
 
 
 if __name__ == "__main__":
