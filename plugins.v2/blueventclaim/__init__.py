@@ -26,7 +26,7 @@ class BLUEventClaim(_PluginBase):
     plugin_name = "BLU活动奖励自动领取"
     plugin_desc = "通过 BLU 网页接口自动领取当天 Event 奖励"
     plugin_icon = "https://blutopia.cc/favicon.svg"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "blueventclaim_"
@@ -38,6 +38,8 @@ class BLUEventClaim(_PluginBase):
     REQUEST_TIMEOUT = 30
     MAX_HISTORY = 10
     MAX_EVENT_SNAPSHOTS = 20
+    RETRY_INTERVAL_HOURS = 6
+    MAX_RETRIES = 2
 
     _enabled = False
     _onlyonce = False
@@ -119,8 +121,12 @@ class BLUEventClaim(_PluginBase):
             "cookie": self._cookie,
         })
 
-    def _claim_reward(self):
+    def _claim_reward(self, retry_count: int = 0, expected_date: str = ""):
         """串行执行一次领取，并保存可审计的结果。"""
+        now = datetime.datetime.now(pytz.timezone(settings.TZ))
+        if expected_date and now.date().isoformat() != expected_date:
+            logger.info("[BLUEventClaim] 重试已跨日，跳过过期任务")
+            return
         if not self._claim_lock.acquire(blocking=False):
             logger.warning("[BLUEventClaim] 已有领取任务运行，本次跳过")
             return
@@ -131,6 +137,31 @@ class BLUEventClaim(_PluginBase):
             result = {"status": "失败", "message": str(err)}
         finally:
             self._claim_lock.release()
+
+        if result["status"] == "待开放":
+            run_date = now + datetime.timedelta(hours=self.RETRY_INTERVAL_HOURS)
+            if retry_count < self.MAX_RETRIES and run_date.date() == now.date():
+                try:
+                    if not self._scheduler:
+                        self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+                    self._scheduler.add_job(
+                        func=self._claim_reward,
+                        trigger="date",
+                        run_date=run_date,
+                        kwargs={"retry_count": retry_count + 1, "expected_date": now.date().isoformat()},
+                        id=f"BLUEventClaimRetry-{now.date().isoformat()}",
+                        replace_existing=True,
+                        name="BLU活动奖励稍后重试",
+                    )
+                    if not self._scheduler.running:
+                        self._scheduler.start()
+                    result["message"] += f"；已安排 {run_date.strftime('%H:%M')} 重试"
+                except Exception as err:
+                    result["status"] = "失败"
+                    result["message"] += f"；安排重试失败：{err}"
+            else:
+                result["status"] = "失败"
+                result["message"] += "；今日重试次数已用尽或已临近跨日"
 
         record = {
             "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -181,7 +212,7 @@ class BLUEventClaim(_PluginBase):
                 text=f"{record['message']}{reward_text}{progress_text}",
             )
 
-    def _do_claim(self) -> Dict[str, Any]:
+    def _do_claim(self, today: Optional[datetime.date] = None) -> Dict[str, Any]:
         """读取活动页并在需要时提交一次领取请求。"""
         event_url = self._normalized_event_url(self._event_url)
         if not event_url:
@@ -213,15 +244,35 @@ class BLUEventClaim(_PluginBase):
         if self._is_login_page(page):
             return {"status": "失败", "message": "BLU Cookie 已失效，请先在站点设置中更新"}
 
-        page_state = self._page_state(page.text)
         progress = self._event_progress(page.text)
-        if page_state["claimed"]:
-            reward = self._claimed_reward(page.text)
+        today = today or datetime.datetime.now(pytz.timezone(settings.TZ)).date()
+        today_day = self._today_day(progress, today)
+        claimable_day = next(
+            (day for day in progress["days"] if day["status"] == "今日待领取"), None
+        )
+        target_day = claimable_day or today_day
+        # BLU 标记的可领卡片优先于 MP2 本地日期，避免时区跨日漏领。
+        if not claimable_day and today_day and today_day["status"] == "已领取":
+            reward = " / ".join(today_day.get("rewards") or [])
             return {
                 "event_url": event_url,
                 "status": "已领取",
                 "reward": reward,
                 "message": "今天的活动奖励已经领取，无需重复提交",
+                **progress,
+            }
+        if not claimable_day and today_day and today_day["status"] == "待开放":
+            return {
+                "event_url": event_url,
+                "status": "待开放",
+                "message": "今天的活动奖励尚未开放领取",
+                **progress,
+            }
+        if not target_day or target_day["status"] != "今日待领取":
+            return {
+                "event_url": event_url,
+                "status": "失败",
+                "message": "活动页未显示今天可领取的奖励卡片",
                 **progress,
             }
 
@@ -236,8 +287,7 @@ class BLUEventClaim(_PluginBase):
 
         claim_url = self._claim_url(page.text, event_url)
         if not claim_url:
-            detail = "今天尚未开放领取" if page_state["future"] else "活动页未找到领取表单"
-            return {"event_url": event_url, "status": "失败", "message": detail, **progress}
+            return {"event_url": event_url, "status": "失败", "message": "活动页未找到领取表单", **progress}
 
         response = request.post_res(
             url=claim_url,
@@ -261,7 +311,11 @@ class BLUEventClaim(_PluginBase):
                 "message": "领取时登录失效，请更新 BLU Cookie",
                 **progress,
             }
-        if not self._page_state(response.text)["claimed"]:
+        result_progress = self._event_progress(response.text)
+        claimed_day = next(
+            (day for day in result_progress["days"] if day["date"] == target_day["date"]), None
+        )
+        if not claimed_day or claimed_day["status"] != "已领取":
             return {
                 "event_url": event_url,
                 "status": "失败",
@@ -269,8 +323,8 @@ class BLUEventClaim(_PluginBase):
                 **progress,
             }
 
-        reward = self._claimed_reward(response.text)
-        progress = self._event_progress(response.text)
+        reward = " / ".join(claimed_day.get("rewards") or [])
+        progress = result_progress
         return {
             "event_url": event_url,
             "status": "成功",
@@ -323,31 +377,11 @@ class BLUEventClaim(_PluginBase):
         return ""
 
     @staticmethod
-    def _page_state(page_html: str) -> Dict[str, bool]:
-        """识别当天奖励状态。"""
-        text = page_html or ""
-        return {
-            "claimed": bool(re.search(r"events__prize-icon--today-claimed", text, re.I)),
-            "future": bool(re.search(r"events__prize-icon--future", text, re.I))
-            and not bool(re.search(r"events__prize-icon--today(?!-claimed)", text, re.I)),
-        }
-
-    @staticmethod
-    def _claimed_reward(page_html: str) -> str:
-        """读取 today-claimed 卡片中显示的奖励文本。"""
-        match = re.search(
-            r'<article\b[^>]*class=["\'][^"\']*events__prize[^"\']*["\'][^>]*>'
-            r'(?:(?!</article>).)*events__prize-icon--today-claimed'
-            r'(?:(?!</article>).)*</article>',
-            page_html or "",
-            re.I | re.S,
-        )
-        if not match:
-            return ""
-        text = re.sub(r"<[^>]+>", " ", match.group(0))
-        text = re.sub(r"\s+", " ", html.unescape(text)).strip()
-        text = re.sub(r"^[A-Z][a-z]{2}\s+\d{1,2}\s*", "", text)
-        return text
+    def _today_day(progress: Dict[str, Any], today: datetime.date) -> Optional[Dict[str, Any]]:
+        """按活动卡片日期选出今天，而非扫描整页的 yesterday 标记。"""
+        month = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[today.month - 1]
+        label = f"{month} {today.day}"
+        return next((day for day in progress["days"] if day["date"] == label), None)
 
     @classmethod
     def _event_progress(cls, page_html: str) -> Dict[str, Any]:
@@ -542,6 +576,22 @@ class BLUEventClaim(_PluginBase):
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """返回插件配置表单。"""
+        timezone_hint = f"MP2 当前时区：{settings.TZ}。"
+        cron_parts = self._cron.split()
+        if len(cron_parts) == 5 and cron_parts[0].isdigit() and cron_parts[1].isdigit():
+            minute, hour = int(cron_parts[0]), int(cron_parts[1])
+            if 0 <= minute < 60 and 0 <= hour < 24:
+                zone = pytz.timezone(settings.TZ)
+                local_day = datetime.datetime.now(zone).date()
+                local = datetime.datetime.combine(local_day, datetime.time(hour, minute))
+                local = zone.localize(local) if hasattr(zone, "localize") else local.replace(tzinfo=zone)
+                utc = local.astimezone(datetime.timezone.utc)
+                offset = (utc.date() - local.date()).days
+                day_text = {-1: "前一天", 0: "当天", 1: "次日"}.get(offset, f"相差{offset}天")
+                timezone_hint += (
+                    f"按当前日期换算，{local:%H:%M} 对应 BLU 网页时间（UTC）{day_text}{utc:%H:%M}。"
+                )
+        timezone_hint += "BLU 页面 Date 使用 UTC。"
         return [{
             "component": "VForm",
             "content": [{
@@ -569,6 +619,7 @@ class BLUEventClaim(_PluginBase):
                     "props": {"cols": 12, "md": 3},
                     "content": [{"component": "VCronField", "props": {
                         "model": "cron", "label": "执行周期", "placeholder": self.DEFAULT_CRON,
+                        "hint": timezone_hint,
                     }}],
                 }],
             }, {
@@ -646,7 +697,7 @@ class BLUEventClaim(_PluginBase):
             latest_alert = {
                 "component": "VAlert",
                 "props": {
-                    "type": "error" if latest_status == "失败" else "success",
+                    "type": "error" if latest_status == "失败" else "warning" if latest_status == "待开放" else "success",
                     "variant": "tonal",
                     "title": f"最近执行：{latest_status}",
                     "text": latest_detail,

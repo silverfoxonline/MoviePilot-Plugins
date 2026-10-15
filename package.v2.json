@@ -3,11 +3,12 @@
     "name": "BLU活动奖励自动领取",
     "description": "使用手动填写或MoviePilot站点配置中的BLU Cookie，通过网页接口自动领取当天Event奖励。",
     "labels": "站点,签到,BLU",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "icon": "https://blutopia.cc/favicon.svg",
     "author": "silverfoxonline",
     "level": 1,
     "history": {
+      "v1.0.4": "修复跨时区凌晨误判昨天已领取；按当天卡片核验领取，待开放时当日最多补查两次；Cron 提示 MP2 与 BLU 网页 UTC 时间换算",
       "v1.0.3": "活动名改为庆祝图标标题；每日状态与奖励合列并按 10/10/剩余天数分列，兼容同一活动跨月",
       "v1.0.2": "修复每日状态和执行历史表格在 MP2 插件详情页中未显示的问题",
       "v1.0.1": "修复无每日缓存时看不到立即运行结果和执行历史的问题",

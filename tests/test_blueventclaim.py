@@ -89,8 +89,11 @@ class BLUEventClaimParserTest(unittest.TestCase):
           <i class="events__prize-message">8924 BON</i>
         </article>
         """
-        self.assertTrue(BLUEventClaim._page_state(page)["claimed"])
-        self.assertEqual(BLUEventClaim._claimed_reward(page), "8924 BON")
+        day = BLUEventClaim._today_day(
+            BLUEventClaim._event_progress(page), datetime.date(2026, 10, 14)
+        )
+        self.assertEqual(day["status"], "已领取")
+        self.assertEqual(day["rewards"], ["8924 BON"])
         self.assertEqual(BLUEventClaim._csrf_token(page), "token-value")
         progress = BLUEventClaim._event_progress(page)
         self.assertEqual(progress["total_days"], 1)
@@ -241,12 +244,22 @@ class BLUEventClaimParserTest(unittest.TestCase):
         unclaimed = """
         <meta name="csrf-token" content="token-value">
         <form action="/giveaways/4/claims" method="POST"></form>
-        <i class="events__prize-icon--today"></i>
+        <article class="events__prize"><h3>Oct 14</h3>
+          <i class="events__prize-icon--today-claimed"></i>
+          <i class="events__prize-message">8924 BON</i>
+        </article>
+        <article class="events__prize"><h3>Oct 15</h3>
+          <i class="events__prize-icon--today-unclaimed"></i>
+        </article>
         """
         claimed = """
         <article class="events__prize"><h3>Oct 14</h3>
           <i class="events__prize-icon--today-claimed"></i>
           <i class="events__prize-message">8924 BON</i>
+        </article>
+        <article class="events__prize"><h3>Oct 15</h3>
+          <i class="events__prize-icon--today-claimed"></i>
+          <i class="events__prize-message">100 BON</i>
         </article>
         """
 
@@ -273,13 +286,177 @@ class BLUEventClaimParserTest(unittest.TestCase):
 
         plugin = BLUEventClaim()
         plugin._event_url = "https://blutopia.cc/giveaways/4"
-        result = plugin._do_claim()
+        result = plugin._do_claim(today=datetime.date(2026, 10, 15))
         self.assertEqual(result["status"], "成功")
-        self.assertEqual(result["reward"], "8924 BON")
-        self.assertEqual(result["total_days"], 1)
-        self.assertEqual(result["claimed_days"], 1)
+        self.assertEqual(result["reward"], "100 BON")
+        self.assertEqual(result["total_days"], 2)
+        self.assertEqual(result["claimed_days"], 2)
         self.assertEqual(FakeRequest.get_calls, 1)
         self.assertEqual(FakeRequest.post_calls, 1)
+
+    def test_yesterday_claim_does_not_hide_today_future_card(self):
+        page = """
+        <article class="events__prize"><h3>Oct 14</h3>
+          <i class="events__prize-icon--today-claimed"></i>
+          <i class="events__prize-message">8924 BON</i>
+        </article>
+        <article class="events__prize"><h3>Oct 15</h3>
+          <i class="events__prize-icon--future"></i>
+          <i class="events__prize-message">Check back later!</i>
+        </article>
+        """
+
+        class FakeRequest:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_res(self, **kwargs):
+                return types.SimpleNamespace(status_code=200, url=kwargs["url"], text=page)
+
+            def post_res(self, **kwargs):
+                raise AssertionError("Future card must not be submitted")
+
+        MODULE.SiteOper = lambda: types.SimpleNamespace(get_by_domain=lambda domain: types.SimpleNamespace(
+            cookie="session=test", ua="test", proxy=0,
+        ))
+        MODULE.RequestUtils = FakeRequest
+        plugin = BLUEventClaim()
+        plugin._event_url = "https://blutopia.cc/giveaways/4"
+        result = plugin._do_claim(today=datetime.date(2026, 10, 15))
+        self.assertEqual(result["status"], "待开放")
+        self.assertEqual(result["reward_totals"][0]["display"], "8,924")
+
+    def test_post_does_not_count_yesterday_as_today_success(self):
+        page = """
+        <meta name="csrf-token" content="token-value">
+        <form action="/giveaways/4/claims" method="POST"></form>
+        <article class="events__prize"><h3>Oct 14</h3>
+          <i class="events__prize-icon--today-claimed"></i>
+          <i class="events__prize-message">8924 BON</i>
+        </article>
+        <article class="events__prize"><h3>Oct 15</h3>
+          <i class="events__prize-icon--today-unclaimed"></i>
+        </article>
+        """
+
+        class FakeRequest:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_res(self, **kwargs):
+                return types.SimpleNamespace(status_code=200, url=kwargs["url"], text=page)
+
+            def post_res(self, **kwargs):
+                return types.SimpleNamespace(status_code=200, url=kwargs["url"], text=page)
+
+        MODULE.SiteOper = lambda: types.SimpleNamespace(get_by_domain=lambda domain: types.SimpleNamespace(
+            cookie="session=test", ua="test", proxy=0,
+        ))
+        MODULE.RequestUtils = FakeRequest
+        plugin = BLUEventClaim()
+        plugin._event_url = "https://blutopia.cc/giveaways/4"
+        result = plugin._do_claim(today=datetime.date(2026, 10, 15))
+        self.assertEqual(result["status"], "失败")
+        self.assertIn("未显示今天已领取", result["message"])
+
+    def test_site_claimable_card_wins_when_mp_timezone_is_one_day_behind(self):
+        page = """
+        <meta name="csrf-token" content="token-value">
+        <form action="/giveaways/4/claims" method="POST"></form>
+        <article class="events__prize"><h3>Oct 14</h3>
+          <i class="events__prize-icon--today-claimed"></i>
+          <i class="events__prize-message">8924 BON</i>
+        </article>
+        <article class="events__prize"><h3>Oct 15</h3>
+          <i class="events__prize-icon--today-unclaimed"></i>
+        </article>
+        """
+        claimed = page.replace("today-unclaimed", "today-claimed").replace(
+            '<h3>Oct 15</h3>\n          <i',
+            '<h3>Oct 15</h3><i class="events__prize-message">100 BON</i>\n          <i',
+        )
+
+        class FakeRequest:
+            post_calls = 0
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_res(self, **kwargs):
+                return types.SimpleNamespace(status_code=200, url=kwargs["url"], text=page)
+
+            def post_res(self, **kwargs):
+                FakeRequest.post_calls += 1
+                return types.SimpleNamespace(status_code=200, url=kwargs["url"], text=claimed)
+
+        MODULE.SiteOper = lambda: types.SimpleNamespace(get_by_domain=lambda domain: types.SimpleNamespace(
+            cookie="session=test", ua="test", proxy=0,
+        ))
+        MODULE.RequestUtils = FakeRequest
+        plugin = BLUEventClaim()
+        plugin._event_url = "https://blutopia.cc/giveaways/4"
+        result = plugin._do_claim(today=datetime.date(2026, 10, 14))
+        self.assertEqual(result["status"], "成功")
+        self.assertEqual(result["reward"], "100 BON")
+        self.assertEqual(FakeRequest.post_calls, 1)
+
+    def test_retry_waits_six_hours_twice_and_stops_same_day(self):
+        class FixedDateTime(datetime.datetime):
+            hour = 3
+
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.datetime(2026, 10, 15, cls.hour, 5, tzinfo=tz)
+
+        original_datetime = MODULE.datetime
+        MODULE.datetime = types.SimpleNamespace(datetime=FixedDateTime, timedelta=datetime.timedelta)
+        try:
+            plugin = BLUEventClaim()
+            plugin._scheduler = None
+            plugin._event_url = "https://blutopia.cc/giveaways/4"
+            plugin._notify = False
+            stored = {}
+            plugin.get_data = lambda key: stored.get(key)
+            plugin.save_data = lambda key, value: stored.__setitem__(key, value)
+            plugin._do_claim = lambda: {
+                "event_url": plugin._event_url,
+                "status": "待开放",
+                "message": "今天的活动奖励尚未开放领取",
+                "days": [],
+            }
+
+            plugin._claim_reward()
+            first = plugin._scheduler.jobs[-1]
+            self.assertEqual(first["run_date"].hour, 9)
+            self.assertEqual(first["kwargs"], {
+                "retry_count": 1, "expected_date": "2026-10-15",
+            })
+            FixedDateTime.hour = 9
+            plugin._claim_reward(**first["kwargs"])
+            second = plugin._scheduler.jobs[-1]
+            self.assertEqual(second["run_date"].hour, 15)
+            self.assertEqual(second["kwargs"]["retry_count"], 2)
+            FixedDateTime.hour = 15
+            plugin._claim_reward(**second["kwargs"])
+            self.assertEqual(len(plugin._scheduler.jobs), 2)
+            self.assertEqual(stored["claim_logs"][-1]["status"], "失败")
+            plugin.stop_service()
+        finally:
+            MODULE.datetime = original_datetime
+
+    def test_cron_hint_uses_mp_configured_timezone(self):
+        plugin = BLUEventClaim()
+        plugin._cron = "5 3 * * *"
+        timezone = MODULE.pytz.timezone
+        MODULE.pytz.timezone = lambda value: datetime.timezone(datetime.timedelta(hours=8))
+        try:
+            form, _ = plugin.get_form()
+            hint = str(form)
+            self.assertIn("MP2 当前时区：Asia/Shanghai", hint)
+            self.assertIn("03:05 对应 BLU 网页时间（UTC）前一天19:05", hint)
+            self.assertIn("BLU 页面 Date 使用 UTC", hint)
+        finally:
+            MODULE.pytz.timezone = timezone
 
     def test_detail_page_reads_only_the_current_event_cache(self):
         self.assertEqual(BLUEventClaim.MAX_HISTORY, 10)
