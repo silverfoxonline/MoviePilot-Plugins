@@ -2,6 +2,7 @@
 
 import datetime
 import html
+import json
 import re
 import threading
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,7 +27,7 @@ class BLUEventClaim(_PluginBase):
     plugin_name = "BLU活动奖励自动领取"
     plugin_desc = "通过 BLU 网页接口自动领取当天 Event 奖励"
     plugin_icon = "https://blutopia.cc/favicon.svg"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "blueventclaim_"
@@ -46,6 +47,8 @@ class BLUEventClaim(_PluginBase):
     _notify = True
     _cron = DEFAULT_CRON
     _random_delay = 0
+    _retry_interval_hours = RETRY_INTERVAL_HOURS
+    _max_retries = MAX_RETRIES
     _event_url = DEFAULT_EVENT_URL
     _cookie = ""
     _scheduler: Optional[BackgroundScheduler] = None
@@ -63,6 +66,14 @@ class BLUEventClaim(_PluginBase):
                 self._random_delay = min(max(int(config.get("random_delay") or 0), 0), 60)
             except (TypeError, ValueError):
                 self._random_delay = 0
+            try:
+                self._retry_interval_hours = min(max(int(config.get("retry_interval_hours", self.RETRY_INTERVAL_HOURS)), 1), 24)
+            except (TypeError, ValueError):
+                self._retry_interval_hours = self.RETRY_INTERVAL_HOURS
+            try:
+                self._max_retries = min(max(int(config.get("max_retries", self.MAX_RETRIES)), 0), 3)
+            except (TypeError, ValueError):
+                self._max_retries = self.MAX_RETRIES
             self._event_url = (config.get("event_url") or self.DEFAULT_EVENT_URL).strip()
             self._cookie = (config.get("cookie") or "").strip()
 
@@ -117,6 +128,8 @@ class BLUEventClaim(_PluginBase):
             "notify": self._notify,
             "cron": self._cron,
             "random_delay": self._random_delay,
+            "retry_interval_hours": self._retry_interval_hours,
+            "max_retries": self._max_retries,
             "event_url": self._event_url,
             "cookie": self._cookie,
         })
@@ -139,8 +152,8 @@ class BLUEventClaim(_PluginBase):
             self._claim_lock.release()
 
         if result["status"] == "待开放":
-            run_date = now + datetime.timedelta(hours=self.RETRY_INTERVAL_HOURS)
-            if retry_count < self.MAX_RETRIES and run_date.date() == now.date():
+            run_date = now + datetime.timedelta(hours=self._retry_interval_hours)
+            if retry_count < self._max_retries and run_date.date() == now.date():
                 try:
                     if not self._scheduler:
                         self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -576,22 +589,27 @@ class BLUEventClaim(_PluginBase):
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """返回插件配置表单。"""
-        timezone_hint = f"MP2 当前时区：{settings.TZ}。"
-        cron_parts = self._cron.split()
-        if len(cron_parts) == 5 and cron_parts[0].isdigit() and cron_parts[1].isdigit():
-            minute, hour = int(cron_parts[0]), int(cron_parts[1])
-            if 0 <= minute < 60 and 0 <= hour < 24:
-                zone = pytz.timezone(settings.TZ)
-                local_day = datetime.datetime.now(zone).date()
-                local = datetime.datetime.combine(local_day, datetime.time(hour, minute))
-                local = zone.localize(local) if hasattr(zone, "localize") else local.replace(tzinfo=zone)
-                utc = local.astimezone(datetime.timezone.utc)
-                offset = (utc.date() - local.date()).days
-                day_text = {-1: "前一天", 0: "当天", 1: "次日"}.get(offset, f"相差{offset}天")
-                timezone_hint += (
-                    f"按当前日期换算，{local:%H:%M} 对应 BLU 网页时间（UTC）{day_text}{utc:%H:%M}。"
-                )
-        timezone_hint += "BLU 页面 Date 使用 UTC。"
+        zone = pytz.timezone(settings.TZ)
+        utc_offset_minutes = int(datetime.datetime.now(zone).utcoffset().total_seconds() // 60)
+        timezone_prefix = json.dumps(
+            f"当前时区: {html.escape(str(settings.TZ))}<br>", ensure_ascii=False,
+        )
+        timezone_display = (
+            "{{ (() => {"
+            "const p = String(cron || '').trim().split(/\\s+/);"
+            f"const prefix = {timezone_prefix};"
+            "if (p.length !== 5 || !/^\\d+$/.test(p[0]) || !/^\\d+$/.test(p[1]) "
+            "|| Number(p[0]) > 59 || Number(p[1]) > 23) "
+            "return prefix + 'BLU时区: UTC（请选择固定时间）';"
+            f"const utcMinutes = Number(p[1]) * 60 + Number(p[0]) - {utc_offset_minutes};"
+            "const minuteOfDay = ((utcMinutes % 1440) + 1440) % 1440;"
+            "const time = String(Math.floor(minuteOfDay / 60)).padStart(2, '0') + ':' "
+            "+ String(minuteOfDay % 60).padStart(2, '0');"
+            "const day = utcMinutes < 0 ? '前一天' : utcMinutes >= 1440 ? '次日' : '当天';"
+            "const dayLabel = day === '前一天' ? '<span class=\"text-error font-weight-bold\">前一天</span>' : day;"
+            "return prefix + 'BLU时区: UTC ' + time + ', 为' + dayLabel;"
+            "})() }}"
+        )
         return [{
             "component": "VForm",
             "content": [{
@@ -619,8 +637,10 @@ class BLUEventClaim(_PluginBase):
                     "props": {"cols": 12, "md": 3},
                     "content": [{"component": "VCronField", "props": {
                         "model": "cron", "label": "执行周期", "placeholder": self.DEFAULT_CRON,
-                        "hint": timezone_hint,
-                    }}],
+                    }}, {
+                        "component": "div",
+                        "props": {"class": "text-body-2 mt-2", "innerHTML": timezone_display},
+                    }],
                 }],
             }, {
                 "component": "VRow",
@@ -649,6 +669,31 @@ class BLUEventClaim(_PluginBase):
                 "component": "VRow",
                 "content": [{
                     "component": "VCol",
+                    "props": {"cols": 12, "md": 3},
+                    "content": [{"component": "VTextField", "props": {
+                        "model": "retry_interval_hours",
+                        "label": "未开放补查间隔（小时）",
+                        "type": "number",
+                        "min": 1,
+                        "max": 24,
+                        "hint": "默认 6 小时；仅网页显示未开放时补查，跨日自动跳过。",
+                    }}],
+                }, {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 3},
+                    "content": [{"component": "VTextField", "props": {
+                        "model": "max_retries",
+                        "label": "当日最多补查次数",
+                        "type": "number",
+                        "min": 0,
+                        "max": 3,
+                        "hint": "默认 2 次；0 表示不补查，不计首次执行。",
+                    }}],
+                }],
+            }, {
+                "component": "VRow",
+                "content": [{
+                    "component": "VCol",
                     "props": {"cols": 12},
                     "content": [{"component": "VTextField", "props": {
                         "model": "cookie",
@@ -663,7 +708,7 @@ class BLUEventClaim(_PluginBase):
                 "props": {
                     "type": "info",
                     "variant": "tonal",
-                    "text": "仅定时任务或立即运行时访问 BLU；打开详情页只读取本地缓存。已领取时请求一次，需要领取时请求两次。随机延迟只影响 Cron 定时任务，不影响立即运行。",
+                    "text": "仅定时、立即运行或按配置补查时访问 BLU；打开详情页只读取本地缓存。已领取时请求一次，需要领取时请求两次。随机延迟只影响 Cron 定时任务。",
                 },
             }],
         }], {
@@ -672,6 +717,8 @@ class BLUEventClaim(_PluginBase):
             "notify": True,
             "cron": self.DEFAULT_CRON,
             "random_delay": 0,
+            "retry_interval_hours": self.RETRY_INTERVAL_HOURS,
+            "max_retries": self.MAX_RETRIES,
             "event_url": self.DEFAULT_EVENT_URL,
             "cookie": "",
         }

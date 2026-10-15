@@ -2,6 +2,9 @@
 
 import datetime
 import importlib.util
+import json
+import shutil
+import subprocess
 import sys
 import types
 import unittest
@@ -221,6 +224,20 @@ class BLUEventClaimParserTest(unittest.TestCase):
         self.assertEqual(plugin._random_delay, 60)
         plugin.init_plugin({"random_delay": -1})
         self.assertEqual(plugin._random_delay, 0)
+
+    def test_retry_settings_are_configurable_and_bounded(self):
+        plugin = BLUEventClaim()
+        plugin.init_plugin({"retry_interval_hours": 4, "max_retries": 1})
+        self.assertEqual((plugin._retry_interval_hours, plugin._max_retries), (4, 1))
+        plugin.init_plugin({"retry_interval_hours": 99, "max_retries": 99})
+        self.assertEqual((plugin._retry_interval_hours, plugin._max_retries), (24, 3))
+        plugin.init_plugin({"retry_interval_hours": 0, "max_retries": -1})
+        self.assertEqual((plugin._retry_interval_hours, plugin._max_retries), (1, 0))
+        form, defaults = plugin.get_form()
+        self.assertEqual(defaults["retry_interval_hours"], 6)
+        self.assertEqual(defaults["max_retries"], 2)
+        self.assertIn("retry_interval_hours", str(form))
+        self.assertIn("max_retries", str(form))
 
     def test_immediate_run_is_scheduled_after_saving_config(self):
         plugin = BLUEventClaim()
@@ -444,17 +461,34 @@ class BLUEventClaimParserTest(unittest.TestCase):
         finally:
             MODULE.datetime = original_datetime
 
-    def test_cron_hint_uses_mp_configured_timezone(self):
+    def test_cron_timezone_display_reacts_before_saving(self):
         plugin = BLUEventClaim()
         plugin._cron = "5 3 * * *"
         timezone = MODULE.pytz.timezone
         MODULE.pytz.timezone = lambda value: datetime.timezone(datetime.timedelta(hours=8))
         try:
             form, _ = plugin.get_form()
-            hint = str(form)
-            self.assertIn("MP2 当前时区：Asia/Shanghai", hint)
-            self.assertIn("03:05 对应 BLU 网页时间（UTC）前一天19:05", hint)
-            self.assertIn("BLU 页面 Date 使用 UTC", hint)
+            cron_column = form[0]["content"][0]["content"][3]
+            self.assertEqual(cron_column["content"][0]["component"], "VCronField")
+            display = cron_column["content"][1]["props"]["innerHTML"]
+            self.assertTrue(display.startswith("{{") and display.endswith("}}"))
+            if not shutil.which("node"):
+                self.skipTest("Node.js is required to evaluate the frontend expression")
+            expression = display[2:-2].strip()
+            script = (
+                "const expr=JSON.parse(process.argv[1]);"
+                "const cron=process.argv[2];"
+                "console.log(new Function('model','with(model){return '+expr+'}')({cron}));"
+            )
+            def render(cron):
+                result = subprocess.run(
+                    ["node", "-e", script, json.dumps(expression), cron],
+                    capture_output=True, text=True, encoding="utf-8", check=True,
+                )
+                return result.stdout.strip()
+            self.assertIn("当前时区: Asia/Shanghai<br>BLU时区: UTC 19:05", render("5 3 * * *"))
+            self.assertIn('class="text-error font-weight-bold">前一天</span>', render("5 3 * * *"))
+            self.assertIn("BLU时区: UTC 01:05, 为当天", render("5 9 * * *"))
         finally:
             MODULE.pytz.timezone = timezone
 
