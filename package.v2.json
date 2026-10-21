@@ -56,6 +56,19 @@
       "v1.0.0": "支持 DStudio 定时签到、立即运行、结果通知和签到历史"
     }
   },
+  "Savept": {
+    "name": "Vue-PT监护室",
+    "description": "展示 PT 站点运行状态、病危通知与站庆预告。",
+    "labels": "站点,工具",
+    "version": "1.1.2",
+    "icon": "https://raw.githubusercontent.com/KoWming/MoviePilot-Plugins/main/icons/savept.png",
+    "author": "KoWming,silverfoxonline",
+    "level": 2,
+    "history": {
+      "v1.1.2": "修复站点卡片整页正则回溯导致 MP2 卡死，改为 HTML 节点解析",
+      "v1.1.1": "基于 KoWming 原版 Vue-PT监护室"
+    }
+  },
   "PTSiteOpenSignup": {
     "name": "PT站开放注册监控",
     "description": "自动监测站点注册页面状态，仅在站点变为开放注册时发送通知。",

@@ -52,3 +52,7 @@ tracker.beyond-hd.me -> BHD
 ```
 
 原始插件作者：bfjy；当前仓库维护：silverfoxonline。
+
+### Vue-PT监护室
+
+基于 [KoWming 的 Savept 插件](https://github.com/KoWming/MoviePilot-Plugins) v1.1.1，保留原作者署名。v1.1.2 将整页正则匹配改为按 HTML 卡片节点解析，修复抓取站点页面时可能使 MP2 卡死的问题。
