@@ -12,6 +12,7 @@ import requests
 from lxml import etree
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 from app.core.config import settings
 from app.db.site_oper import SiteOper
@@ -24,7 +25,7 @@ class SeedpoolEventClaim(_PluginBase):
     plugin_name = "SP活动奖励自动领取"
     plugin_desc = "自动发现 Seedpool 全部活动，逐个领取当天奖励"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "seedpooleventclaim_"
@@ -39,6 +40,7 @@ class SeedpoolEventClaim(_PluginBase):
     RETRY_INTERVAL_HOURS = 6
     MAX_RETRIES = 2
     _enabled = False
+    _onlyonce = False
     _notify = True
     _cron = DEFAULT_CRON
     _cookie = ""
@@ -52,21 +54,13 @@ class SeedpoolEventClaim(_PluginBase):
         self.stop_service()
         config = config or {}
         self._enabled = config.get("enabled", False)
+        self._onlyonce = bool(config.get("onlyonce", False))
         self._notify = config.get("notify", True)
         self._cron = config.get("cron") or self.DEFAULT_CRON
         self._cookie = (config.get("cookie") or "").strip()
         self._random_delay = self._config_int(config, "random_delay", 0, 0, 60)
         self._retry_interval_hours = self._config_int(config, "retry_interval_hours", self.RETRY_INTERVAL_HOURS, 1, 24)
         self._max_retries = self._config_int(config, "max_retries", self.MAX_RETRIES, 0, 3)
-        if config.get("onlyonce"):
-            self.update_config({**config, "onlyonce": False})
-            self._scheduler = BackgroundScheduler(timezone=settings.TZ)
-            self._scheduler.add_job(
-                func=self.claim_rewards, trigger="date",
-                run_date=self._now() + datetime.timedelta(seconds=3),
-                name="SP活动奖励立即领取",
-            )
-            self._scheduler.start()
 
     @staticmethod
     def _config_int(config: dict, key: str, default: int, minimum: int, maximum: int) -> int:
@@ -80,22 +74,33 @@ class SeedpoolEventClaim(_PluginBase):
         return datetime.datetime.now(pytz.timezone(settings.TZ))
 
     def get_state(self) -> bool:
-        return self._enabled
+        return self._enabled or self._onlyonce or bool((self.get_config() or {}).get("onlyonce"))
 
     def get_service(self) -> List[Dict[str, Any]]:
+        services = []
+        # 配置保存后 MP2 会重新注册服务。保留请求标记直到回调开始，
+        # 避免初始化/重载期间提前复位或取消私有调度器造成请求丢失。
+        if (self.get_config() or {}).get("onlyonce", self._onlyonce):
+            services.append({
+                "id": "SeedpoolEventClaimOnce", "name": "SP活动奖励立即领取",
+                "trigger": DateTrigger(run_date=self._now() + datetime.timedelta(seconds=3), timezone=settings.TZ),
+                "func": self.claim_rewards, "func_kwargs": {"onlyonce": True},
+                "kwargs": {"misfire_grace_time": 300},
+            })
+            logger.info("[SeedpoolEventClaim] 已向 MP2 注册立即运行任务，等待执行")
         if not self._enabled:
-            return []
+            return services
         try:
             trigger = CronTrigger.from_crontab(self._cron, timezone=settings.TZ)
             trigger.jitter = self._random_delay * 60
-            return [{
+            services.append({
                 "id": "SeedpoolEventClaim", "name": self.plugin_name,
                 "trigger": trigger,
                 "func": self.claim_rewards, "kwargs": {},
-            }]
+            })
         except (ValueError, TypeError):
             logger.error("[SeedpoolEventClaim] Cron 配置无效")
-            return []
+        return services
 
     def stop_service(self):
         if self._scheduler:
@@ -292,16 +297,27 @@ class SeedpoolEventClaim(_PluginBase):
         message = str(err) if isinstance(err, ValueError) else f"请求或处理异常（{type(err).__name__}），下次运行将重新检查"
         return {"status": "失败", "message": message}
 
-    def claim_rewards(self, expected_date: str = ""):
+    def claim_rewards(self, expected_date: str = "", onlyonce: bool = False):
         now = self._now()
         today = now.date().isoformat()
         if expected_date and expected_date != today:
             logger.info("[SeedpoolEventClaim] 补查已跨日，跳过过期任务")
             return
-        if not self._run_lock.acquire(blocking=False):
+        if not self._run_lock.acquire(blocking=onlyonce):
             logger.info("[SeedpoolEventClaim] 已有任务运行，本次跳过")
             return
         try:
+            if onlyonce:
+                config = self.get_config() or {}
+                if not config.get("onlyonce", self._onlyonce):
+                    return
+                self._onlyonce = False
+                self.update_config({
+                    "enabled": self._enabled, "notify": self._notify, "cron": self._cron,
+                    "cookie": self._cookie, "random_delay": self._random_delay,
+                    "retry_interval_hours": self._retry_interval_hours, "max_retries": self._max_retries,
+                    **config, "onlyonce": False,
+                })
             usage = self.get_data("retry_usage") or {}
             used = usage.get("count", 0) if usage.get("date") == today else 0
             if expected_date:
@@ -309,6 +325,8 @@ class SeedpoolEventClaim(_PluginBase):
                     return
                 used += 1
                 self.save_data("retry_usage", {"date": today, "count": used})
+            logger.info(f"[SeedpoolEventClaim] 开始执行：{'立即运行' if onlyonce else '未开放补查' if expected_date else '定时检查'}")
+            self.save_data("last_run", {"time": now.strftime("%Y-%m-%d %H:%M:%S"), "message": "正在读取活动列表并逐个检查奖励"})
             try:
                 results = self._run()
             except Exception as err:
@@ -334,6 +352,7 @@ class SeedpoolEventClaim(_PluginBase):
             self.save_data("claim_logs", ((self.get_data("claim_logs") or []) + records)[-self.MAX_HISTORY:])
             summary = f"检查 {len(results)} 个活动，成功 {sum(r['status'] == '成功' for r in results)}，失败 {sum(r['status'] == '失败' for r in results)}"
             self.save_data("last_run", {"time": checked, "message": summary})
+            logger.info(f"[SeedpoolEventClaim] 执行结束：{summary}")
             if self._notify and any(r["status"] in ("成功", "失败") for r in results):
                 self.post_message(
                     mtype=NotificationType.SiteMessage, title="【SP活动奖励】" + summary,

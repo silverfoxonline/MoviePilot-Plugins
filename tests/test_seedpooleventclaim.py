@@ -34,6 +34,12 @@ class Scheduler:
         self.jobs = [job for job in self.jobs if job.get("id") != job_id]
 
 
+class DateTrigger:
+    def __init__(self, run_date, timezone=None):
+        self.run_date = run_date
+        self.timezone = timezone
+
+
 def module(name, **attrs):
     result = types.ModuleType(name)
     result.__dict__.update(attrs)
@@ -48,6 +54,7 @@ STUBS = {
     "apscheduler.schedulers.background": module("apscheduler.schedulers.background", BackgroundScheduler=Scheduler),
     "apscheduler.triggers": module("apscheduler.triggers"),
     "apscheduler.triggers.cron": module("apscheduler.triggers.cron", CronTrigger=Mock()),
+    "apscheduler.triggers.date": module("apscheduler.triggers.date", DateTrigger=DateTrigger),
     "app": module("app"), "app.core": module("app.core"), "app.db": module("app.db"),
     "app.core.config": module("app.core.config", settings=types.SimpleNamespace(TZ="Asia/Shanghai", USER_AGENT="fixture-ua", PROXY={"https": "http://proxy.test"})),
     "app.db.site_oper": module("app.db.site_oper", SiteOper=Mock()),
@@ -84,9 +91,11 @@ class SeedpoolEventClaimTest(unittest.TestCase):
     def setUp(self):
         self.plugin = Plugin()
         self.data = {}
+        self.config = {}
         self.plugin.get_data = self.data.get
+        self.plugin.get_config = lambda: dict(self.config)
         self.plugin.save_data = lambda key, value: self.data.update({key: value})
-        self.plugin.update_config = Mock()
+        self.plugin.update_config = Mock(side_effect=lambda config: self.config.update(config) or True)
         self.plugin.post_message = Mock()
 
     def test_real_index_discovers_all_events_including_ended_but_active(self):
@@ -272,11 +281,16 @@ class SeedpoolEventClaimTest(unittest.TestCase):
 
     def test_onlyonce_and_defaults(self):
         self.plugin.init_plugin({"onlyonce": True})
-        self.assertTrue(self.plugin._scheduler.running)
-        self.assertEqual(len(self.plugin._scheduler.jobs), 1)
-        self.assertFalse(self.plugin.update_config.call_args.args[0]["onlyonce"])
-        self.plugin.stop_service()
         self.assertIsNone(self.plugin._scheduler)
+        self.plugin.update_config.assert_not_called()
+        self.assertTrue(self.plugin.get_state())
+        once = self.plugin.get_service()[0]
+        self.assertEqual(once["id"], "SeedpoolEventClaimOnce")
+        self.assertEqual(once["func_kwargs"], {"onlyonce": True})
+        with patch.object(self.plugin, "_run", return_value=[]):
+            once["func"](**once["func_kwargs"])
+        self.assertFalse(self.plugin.update_config.call_args.args[0]["onlyonce"])
+        self.assertFalse(self.plugin.get_state())
         self.assertEqual(self.plugin.get_service(), [])
         self.assertEqual(self.plugin.get_form()[1]["cron"], Plugin.DEFAULT_CRON)
 
@@ -367,10 +381,55 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         now = datetime.datetime(2026, 10, 25, 9)
         with patch.object(self.plugin, "_now", return_value=now):
             self.plugin.init_plugin({"enabled": True, "onlyonce": True, "random_delay": 30})
-        self.assertEqual(self.plugin._scheduler.jobs[0]["run_date"], now + datetime.timedelta(seconds=3))
         trigger = Mock()
-        with patch.object(PLUGIN_MODULE.CronTrigger, "from_crontab", return_value=trigger):
-            self.assertEqual(self.plugin.get_service()[0]["trigger"].jitter, 1800)
+        with patch.object(self.plugin, "_now", return_value=now), patch.object(PLUGIN_MODULE.CronTrigger, "from_crontab", return_value=trigger):
+            services = self.plugin.get_service()
+        self.assertEqual(services[0]["trigger"].run_date, now + datetime.timedelta(seconds=3))
+        self.assertEqual(services[1]["trigger"].jitter, 1800)
+        self.assertNotIn("jitter", services[0]["kwargs"])
+
+    def test_immediate_request_survives_init_and_service_reregistration(self):
+        self.config.update({"onlyonce": True, "enabled": True, "cookie": "private-cookie", "random_delay": 30, "extra": "keep"})
+        self.plugin.init_plugin(dict(self.config))
+        first = self.plugin.get_service()
+        self.plugin.stop_service()
+        self.plugin.init_plugin(dict(self.config))
+        second = self.plugin.get_service()
+        self.assertEqual(first[0]["id"], second[0]["id"])
+        self.plugin.update_config.assert_not_called()
+        with patch.object(self.plugin, "_run", return_value=[]) as run:
+            second[0]["func"](**second[0]["func_kwargs"])
+            first[0]["func"](**first[0]["func_kwargs"])
+        run.assert_called_once()
+        self.assertFalse(self.config["onlyonce"])
+        self.assertEqual(self.config["extra"], "keep")
+        self.assertEqual(self.config["cookie"], "private-cookie")
+        self.assertEqual(self.config["random_delay"], 30)
+        self.assertNotIn("private-cookie", json.dumps(self.data))
+        self.assertEqual([service["id"] for service in self.plugin.get_service()], ["SeedpoolEventClaim"])
+
+    def test_persisted_immediate_flag_is_checked_when_registering_services(self):
+        self.plugin.init_plugin({"enabled": False})
+        self.config["onlyonce"] = True
+        self.assertTrue(self.plugin.get_state())
+        self.assertEqual(self.plugin.get_service()[0]["id"], "SeedpoolEventClaimOnce")
+
+    def test_bad_cron_does_not_drop_immediate_task(self):
+        self.plugin.init_plugin({"enabled": True, "onlyonce": True, "cron": "invalid"})
+        with patch.object(PLUGIN_MODULE.CronTrigger, "from_crontab", side_effect=ValueError):
+            self.assertEqual([service["id"] for service in self.plugin.get_service()], ["SeedpoolEventClaimOnce"])
+
+    def test_immediate_callback_records_running_then_failure(self):
+        self.plugin.init_plugin({"onlyonce": True})
+        writes = []
+        self.plugin.save_data = lambda key, value: (writes.append((key, value)), self.data.update({key: value}))
+        with patch.object(self.plugin, "_run", side_effect=TimeoutError("private")):
+            self.plugin.claim_rewards(onlyonce=True)
+        states = [value["message"] for key, value in writes if key == "last_run"]
+        self.assertEqual(states[0], "正在读取活动列表并逐个检查奖励")
+        self.assertIn("失败 1", states[-1])
+        self.assertFalse(self.config["onlyonce"])
+        self.assertEqual(self.data["claim_logs"][-1]["status"], "失败")
 
     def test_pending_events_share_one_retry_and_daily_limit_survives_cron(self):
         self.plugin.init_plugin({"max_retries": 1, "retry_interval_hours": 6})
