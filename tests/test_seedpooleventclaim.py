@@ -304,7 +304,7 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         page = self.plugin.get_page()
         tabs = page[1]["content"]
         labels = [node for node in tabs if node["component"] == "label"]
-        self.assertEqual([node["text"] for node in labels], ["Dailies2", "Spooktober2026"])
+        self.assertEqual([node["text"] for node in labels], ["🟢 Dailies2", "🟢 Spooktober2026"])
         radios = [node for node in tabs if node["component"] == "input"]
         self.assertEqual([node["props"]["checked"] for node in radios], [True, False])
         panels = [node for node in tabs if node["component"] == "section"]
@@ -514,6 +514,27 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         content = json.dumps(self.plugin.get_page(), ensure_ascii=False)
         self.assertIn("Cookie 已失效", content)
         self.assertNotIn('"type": "radio"', content)
+
+    def test_tab_activity_status_uses_period_not_daily_claim_status(self):
+        events = Plugin._events(fixture("index"))
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 25)):
+            self.assertEqual([self.plugin._activity_status(event) for event in events],
+                             [("🟢", "进行中"), ("🟢", "进行中"), ("⛔", "已过期")])
+            claimed = {**events[1], **Plugin._event(claimed_page(), events[1]["event_url"])}
+            self.assertEqual(self.plugin._activity_status(claimed), ("🟢", "进行中"))
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 1)):
+            self.assertEqual(self.plugin._activity_status(events[1]), ("⏳", "尚未开始"))
+
+    def test_tab_activity_status_supports_old_cache_and_year_boundary(self):
+        old = {"time": "2026-10-25 09:00:00", "days": [{"date": "Oct 8"}, {"date": "Oct 16"}]}
+        cross_year = {"time": "2026-12-25 09:00:00", "days": [{"date": "Dec 1"}, {"date": "Jan 10"}]}
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 25)):
+            self.assertEqual(self.plugin._activity_status(old), ("⛔", "已过期"))
+            self.assertEqual(self.plugin._activity_status({})[0], "❔")
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2027, 1, 10)):
+            self.assertEqual(self.plugin._activity_status(cross_year), ("🟢", "进行中"))
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2027, 1, 11)):
+            self.assertEqual(self.plugin._activity_status(cross_year), ("⛔", "已过期"))
 
     def test_manifest_matches_plugin(self):
         manifest = json.loads((PATH.parents[2] / "package.v2.json").read_text(encoding="utf-8"))["SeedpoolEventClaim"]

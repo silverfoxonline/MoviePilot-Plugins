@@ -25,7 +25,7 @@ class SeedpoolEventClaim(_PluginBase):
     plugin_name = "SP活动奖励自动领取"
     plugin_desc = "自动发现 Seedpool 全部活动，逐个领取当天奖励"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "seedpooleventclaim_"
@@ -156,6 +156,9 @@ class SeedpoolEventClaim(_PluginBase):
             url = cls._safe_url(link.get("href"), cls.EVENTS_URL)
             if url and re.fullmatch(r"/events/\d+", urlparse(url).path):
                 events[url] = {"event_url": url, "event_title": cls._text(link)}
+                times = link.xpath("ancestor::tr[1]//time/@datetime")
+                if len(times) >= 2:
+                    events[url].update({"starts_at": times[0], "ends_at": times[1]})
         # 不按本机日期或 Active 图标过滤：附件中已结束活动也可能标为 Active。
         return list(events.values())
 
@@ -344,7 +347,7 @@ class SeedpoolEventClaim(_PluginBase):
             records = []
             for result in results:
                 record = {key: result.get(key, "") for key in
-                          ("event_url", "event_title", "status", "reward", "message")}
+                          ("event_url", "event_title", "status", "reward", "message", "starts_at", "ends_at")}
                 record["time"] = checked
                 records.append(record)
                 if result.get("days"):
@@ -467,7 +470,8 @@ class SeedpoolEventClaim(_PluginBase):
         for record in records:
             url = record.get("event_url")
             if url and self._safe_url(url):
-                snapshots.setdefault(url, {"event_title": record.get("event_title") or url})
+                snapshots.setdefault(url, {"event_title": record.get("event_title") or url,
+                    "starts_at": record.get("starts_at"), "ends_at": record.get("ends_at")})
         urls = sorted(snapshots, key=lambda url: (snapshots[url].get("event_title") or "", url))
         if urls:
             # MP2 PageRender 直接传 props，不提供 FormRender 的 v-model。
@@ -484,13 +488,15 @@ class SeedpoolEventClaim(_PluginBase):
             for index, url in enumerate(urls):
                 tab_id = f"sp-event-{index}"
                 panel_id = tab_id + "-panel"
+                icon, activity_status = self._activity_status(snapshots[url])
+                title = snapshots[url].get("event_title") or url
                 css += f"\n.sp-event-tabs > #{tab_id}:checked ~ #{panel_id} {{ display: block; }}"
                 controls.extend([
                     {"component": "input", "props": {"type": "radio", "name": "sp-event-tabs", "id": tab_id,
                         "class": "sp-event-radio", "checked": index == 0, "aria-controls": panel_id,
-                        "aria-label": snapshots[url].get("event_title") or url}},
-                    {"component": "label", "props": {"for": tab_id, "id": tab_id + "-label", "class": "sp-event-label"},
-                     "text": snapshots[url].get("event_title") or url},
+                        "aria-label": f"{title}，{activity_status}"}},
+                    {"component": "label", "props": {"for": tab_id, "id": tab_id + "-label", "class": "sp-event-label", "title": activity_status},
+                     "text": f"{icon} {title}"},
                 ])
                 event_records = [record for record in records if record.get("event_url") == url]
                 panels.append({"component": "section", "props": {"id": panel_id, "class": "sp-event-panel",
@@ -507,6 +513,37 @@ class SeedpoolEventClaim(_PluginBase):
             page.extend([{"component": "div", "props": {"class": "text-h6 mt-4 mb-2"}, "text": "活动列表执行历史"},
                          self._table(("时间", "结果", "说明"), ("time", "status", "message"), errors[:10])])
         return page
+
+    def _activity_status(self, snapshot: dict) -> Tuple[str, str]:
+        """活动周期与每日领取状态分开；兼容尚未缓存列表起止日期的旧版本。"""
+        today = self._now().date()
+        try:
+            start = datetime.date.fromisoformat((snapshot.get("starts_at") or "")[:10])
+            end = datetime.date.fromisoformat((snapshot.get("ends_at") or "")[:10])
+        except ValueError:
+            days = snapshot.get("days") or []
+            if not days:
+                return "❔", "状态未知，等待活动数据"
+            try:
+                checked = datetime.date.fromisoformat((snapshot.get("time") or "")[:10])
+            except ValueError:
+                checked = today
+            months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+            try:
+                first_month, first_day = days[0]["date"].split()
+                last_month, last_day = days[-1]["date"].split()
+                first_month, last_month = months.index(first_month) + 1, months.index(last_month) + 1
+                cross_year = last_month < first_month
+                end_year = checked.year + int(cross_year and checked.month >= first_month)
+                start = datetime.date(end_year - int(cross_year), first_month, int(first_day))
+                end = datetime.date(end_year, last_month, int(last_day))
+            except (ValueError, KeyError):
+                return "❔", "状态未知，等待活动数据"
+        if today > end:
+            return "⛔", "已过期"
+        if today < start:
+            return "⏳", "尚未开始"
+        return "🟢", "进行中"
 
     def _event_page(self, url: str, snapshot: dict, records: List[dict]) -> List[dict]:
         """各活动独立沿用 BLU 的摘要、奖励卡片及三列每日状态。"""
