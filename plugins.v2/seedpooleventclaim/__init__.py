@@ -1,6 +1,7 @@
 """Seedpool 多活动奖励自动领取，参考同仓库 BLUEventClaim。"""
 
 import datetime
+import html
 import re
 import threading
 from typing import Any, Dict, List, Tuple
@@ -23,7 +24,7 @@ class SeedpoolEventClaim(_PluginBase):
     plugin_name = "SP活动奖励自动领取"
     plugin_desc = "自动发现 Seedpool 全部活动，逐个领取当天奖励"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "seedpooleventclaim_"
@@ -310,16 +311,25 @@ class SeedpoolEventClaim(_PluginBase):
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         fields = [
             ("VSwitch", "enabled", "启用插件", {}),
-            ("VSwitch", "notify", "领取结果通知", {}),
             ("VSwitch", "onlyonce", "立即运行一次", {}),
-            ("VTextField", "cron", "执行周期", {"hint": f"使用 MP2 时区 {settings.TZ}；默认每 6 小时检查一次"}),
-            ("VTextField", "cookie", "SP Cookie（可选）", {"type": "password", "hint": "留空使用 MoviePilot 中 seedpool.org 站点的 Cookie、UA 和代理设置"}),
+            ("VSwitch", "notify", "成功或失败时通知", {}),
+            ("VCronField", "cron", "执行周期", {"placeholder": self.DEFAULT_CRON}),
         ]
         return [{"component": "VForm", "content": [
             {"component": "VRow", "content": [{
-                "component": "VCol", "props": {"cols": 12, "md": 4 if component == "VSwitch" else 12},
-                "content": [{"component": component, "props": {"model": model, "label": label, **props}}],
+                "component": "VCol", "props": {"cols": 12, "md": 3},
+                "content": [{"component": component, "props": {"model": model, "label": label, **props}}] + (
+                    [{"component": "div", "props": {"class": "text-body-2 mt-2"}, "text":
+                      f"当前时区：{settings.TZ}；默认每 6 小时检查，领取日期以站点卡片为准。"}]
+                    if model == "cron" else []),
             } for component, model, label, props in fields]},
+            {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [
+                {"component": "VTextField", "props": {
+                    "model": "cookie", "label": "SP Cookie（可选）", "type": "password",
+                    "placeholder": "留空则读取 MoviePilot 的 SP 站点 Cookie",
+                    "hint": "填写后优先使用此 Cookie；UA 和代理读取 seedpool.org 站点设置。",
+                }},
+            ]}]},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text":
                 "自动从 /events 获取所有活动并分别领取，以网页可领卡片为准。每次先检查再提交，已领取不重复提交；单个活动失败不影响其他活动。详情页只展示缓存，不访问站点。"}},
         ]}], {"enabled": False, "notify": True, "onlyonce": False, "cron": self.DEFAULT_CRON, "cookie": ""}
@@ -334,23 +344,179 @@ class SeedpoolEventClaim(_PluginBase):
         ]}
 
     def get_page(self) -> List[dict]:
+        """按活动名称分标签页；标签只切换缓存展示，不触发网络请求。"""
         last_run = self.get_data("last_run") or {}
         page = [{"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text":
                 f"{last_run.get('time', '')} {last_run.get('message', '尚未执行，请勾选立即运行一次并保存')}"}}]
-        current_month = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[self._now().month - 1]
-        snapshots = self.get_data("event_snapshots") or {}
-        for snapshot in sorted(snapshots.values(), key=lambda item: item.get("time", ""), reverse=True):
-            page.append({"component": "div", "props": {"class": "text-h6 mt-4 mb-2"}, "text":
-                         f"🎁 {snapshot['event_title']} · 已领 {snapshot['claimed_days']}/{snapshot['total_days']} 天 · 更新 {snapshot['time']}"})
-            days = snapshot.get("days") or []
-            visible = [day for day in days if day["date"].startswith(current_month + " ")] or days
-            rows = [{"date": day["date"], "status": day["status"], "reward": " / ".join(day["rewards"])} for day in visible]
-            page.append(self._table(("日期", "状态", "奖励"), ("date", "status", "reward"), rows))
-        page.append({"component": "div", "props": {"class": "text-h6 mt-4 mb-2"}, "text": "执行历史（最近 100 条）"})
-        page.append(self._table(("时间", "活动", "结果", "奖励", "说明"),
-                                ("time", "event_title", "status", "reward", "message"),
-                                list(reversed(self.get_data("claim_logs") or []))))
+        snapshots = dict(self.get_data("event_snapshots") or {})
+        records = list(reversed(self.get_data("claim_logs") or []))
+        # 详情请求失败的活动仍有标签，展示错误和先前缓存；兼容 1.0.0 的数据。
+        for record in records:
+            url = record.get("event_url")
+            if url and self._safe_url(url):
+                snapshots.setdefault(url, {"event_title": record.get("event_title") or url})
+        urls = sorted(snapshots, key=lambda url: (snapshots[url].get("event_title") or "", url))
+        if urls:
+            # MP2 PageRender 直接传 props，不提供 FormRender 的 v-model。
+            # 使用原生 radio/label 与局部 CSS 切换，避免标签高亮变化但内容不切换。
+            css = """
+                .sp-event-tabs { position: relative; display: flex; flex-wrap: wrap; gap: 4px; }
+                .sp-event-tabs > .sp-event-radio { position: absolute; opacity: 0; width: 1px; height: 1px; }
+                .sp-event-tabs > .sp-event-label { padding: 12px 18px; cursor: pointer; border-bottom: 2px solid transparent; font-weight: 500; }
+                .sp-event-tabs > .sp-event-radio:checked + .sp-event-label { color: rgb(var(--v-theme-primary)); border-color: currentColor; background: rgba(var(--v-theme-primary), .08); }
+                .sp-event-tabs > .sp-event-radio:focus-visible + .sp-event-label { outline: 2px solid rgb(var(--v-theme-primary)); outline-offset: -2px; }
+                .sp-event-tabs > .sp-event-panel { display: none; flex-basis: 100%; min-width: 0; padding-top: 16px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+            """
+            controls, panels = [], []
+            for index, url in enumerate(urls):
+                tab_id = f"sp-event-{index}"
+                panel_id = tab_id + "-panel"
+                css += f"\n.sp-event-tabs > #{tab_id}:checked ~ #{panel_id} {{ display: block; }}"
+                controls.extend([
+                    {"component": "input", "props": {"type": "radio", "name": "sp-event-tabs", "id": tab_id,
+                        "class": "sp-event-radio", "checked": index == 0, "aria-controls": panel_id,
+                        "aria-label": snapshots[url].get("event_title") or url}},
+                    {"component": "label", "props": {"for": tab_id, "id": tab_id + "-label", "class": "sp-event-label"},
+                     "text": snapshots[url].get("event_title") or url},
+                ])
+                event_records = [record for record in records if record.get("event_url") == url]
+                panels.append({"component": "section", "props": {"id": panel_id, "class": "sp-event-panel",
+                    "aria-labelledby": tab_id + "-label"},
+                    "content": self._event_page(url, snapshots[url], event_records)})
+            page.append({"component": "div", "props": {"class": "sp-event-tabs mt-4"}, "content": [
+                {"component": "style", "html": css}, *controls, *panels,
+            ]})
+        else:
+            page.append({"component": "VAlert", "props": {"type": "warning", "variant": "tonal",
+                "text": "暂无活动缓存。勾选立即运行一次并保存后，将按发现的活动名称生成标签页。"}})
+        errors = [record for record in records if not record.get("event_url")]
+        if errors:
+            page.extend([{"component": "div", "props": {"class": "text-h6 mt-4 mb-2"}, "text": "活动列表执行历史"},
+                         self._table(("时间", "结果", "说明"), ("time", "status", "message"), errors[:10])])
         return page
+
+    def _event_page(self, url: str, snapshot: dict, records: List[dict]) -> List[dict]:
+        """各活动独立沿用 BLU 的摘要、奖励卡片及三列每日状态。"""
+        days = snapshot.get("days") or []
+        latest = records[0] if records else snapshot
+        status = latest.get("status") or "尚未执行"
+        page = [{"component": "div", "props": {"class": "text-h5 font-weight-bold mt-2 mb-4"}, "text":
+                 f"🎉 {snapshot.get('event_title') or 'SP Event'} · Event #{url.rsplit('/', 1)[-1]}"},
+                {"component": "a", "props": {"href": url, "target": "_blank", "rel": "noopener noreferrer"}, "text": "查看站点活动页面"},
+                {"component": "VAlert", "props": {"type": "error" if status == "失败" else "success" if status == "成功" else "info",
+                    "variant": "tonal", "title": f"最近执行：{status}", "class": "my-4",
+                    "text": " · ".join(filter(None, [latest.get("time"), latest.get("message"), latest.get("reward")]))}}]
+        if days:
+            summary = [("活动总天数", len(days), "info"),
+                       ("已领取", sum(day["status"] == "已领取" for day in days), "success"),
+                       ("已过期未领", sum(day["status"] == "已过期未领" for day in days), "error"),
+                       ("今日待领取", sum(day["status"] == "今日待领取" for day in days), "warning"),
+                       ("待开放", sum(day["status"] == "待开放" for day in days), "info")]
+            page.append({"component": "div", "props": {"class": "text-body-2 mb-2"}, "text": f"状态缓存更新：{snapshot.get('time') or '—'}"})
+            page.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12, "sm": 6, "md": 2},
+                "content": [{"component": "VAlert", "props": {"type": color, "variant": "tonal", "title": title, "text": str(value)}}],
+            } for title, value, color in summary]})
+            page.append({"component": "div", "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"}, "text": "奖励总计"})
+            totals = self._reward_totals(days)
+            if totals:
+                page.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12, "sm": 6, "md": 3},
+                    "content": [{"component": "VAlert", "props": {"type": "success", "variant": "tonal", "title": item["label"], "text": item["display"]}}],
+                } for item in totals]})
+            else:
+                page.append({"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": "当前活动尚无已领取奖励。"}})
+            current_month = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[self._now().month - 1]
+            visible = [day for day in days if day["date"].startswith(current_month + " ")] or days
+            icons = {"已领取": "✅", "已过期未领": "⛔", "今日待领取": "🎁", "待开放": "⏳", "状态未知": "❔"}
+            rows = [{"date": day["date"], "status": f"{icons.get(day['status'], '❔')} {day['status']} " + " / ".join(day["rewards"])} for day in visible]
+            page.append({"component": "div", "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"}, "text": f"每日状态（{current_month}）"})
+            page.append({"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12, "md": 4},
+                "content": [self._table(("日期", "状态 / 奖励"), ("date", "status"), items)],
+            } for items in (rows[:10], rows[10:20], rows[20:]) if items]})
+        else:
+            page.append({"component": "VAlert", "props": {"type": "warning", "variant": "tonal", "text": "暂无此活动的每日状态缓存，请查看最近执行结果。"}})
+        page.extend([{"component": "div", "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"}, "text": "本活动执行历史（最近 10 条）"},
+                     self._table(("时间", "结果", "本次奖励", "说明"), ("time", "status", "reward", "message"), records[:10])])
+        return page
+
+    @staticmethod
+    def _reward_totals(days: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """汇总已领取日期中的已知及未知奖励类型。"""
+        totals: Dict[str, Dict[str, Any]] = {}
+        for day in days:
+            if day.get("status") != "已领取":
+                continue
+            for reward in day.get("rewards") or []:
+                parsed = SeedpoolEventClaim._parse_reward(reward)
+                current = totals.setdefault(parsed["key"], {
+                    "key": parsed["key"],
+                    "label": parsed["label"],
+                    "kind": parsed["kind"],
+                    "value": 0,
+                })
+                current["value"] += parsed["value"]
+
+        priority = {"bon": 0, "fl_tokens": 1, "upload": 2}
+        result = sorted(totals.values(), key=lambda item: (priority.get(item["key"], 99), item["label"]))
+        for item in result:
+            if item["kind"] == "bytes":
+                item["display"] = SeedpoolEventClaim._format_bytes(item["value"])
+            elif item["kind"] == "count":
+                item["display"] = f"× {int(item['value'])}"
+            else:
+                item["display"] = SeedpoolEventClaim._format_number(item["value"])
+        return result
+
+    @staticmethod
+    def _parse_reward(reward: str) -> Dict[str, Any]:
+        """识别常见奖励；未知奖励按名称动态分组。"""
+        text = re.sub(r"\s+", " ", html.unescape(reward or "")).strip()
+        number = r"([\d,]+(?:\.\d+)?)"
+
+        match = re.fullmatch(number + r"\s*(?:BON|BP|BONUS(?:\s+POINTS?)?)", text, re.I)
+        if match:
+            return {"key": "bon", "label": "BON", "kind": "number", "value": SeedpoolEventClaim._number(match.group(1))}
+
+        match = re.fullmatch(number + r"\s*(?:FL\s*)?(?:TOKENS?|FREELEECH\s+TOKENS?)", text, re.I)
+        if match:
+            return {"key": "fl_tokens", "label": "FL Token", "kind": "number", "value": SeedpoolEventClaim._number(match.group(1))}
+
+        match = re.fullmatch(
+            number + r"\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)(?:\s+UPLOAD)?",
+            text,
+            re.I,
+        )
+        if match:
+            unit = match.group(2).lower()
+            powers = {"kb": 1, "mb": 2, "gb": 3, "tb": 4, "kib": 1, "mib": 2, "gib": 3, "tib": 4}
+            base = 1024 if "i" in unit else 1000
+            value = SeedpoolEventClaim._number(match.group(1)) * (base ** powers[unit])
+            return {"key": "upload", "label": "上传量", "kind": "bytes", "value": value}
+
+        match = re.fullmatch(number + r"\s+(.+)", text)
+        if match:
+            label = re.sub(r"\s+", " ", match.group(2)).strip()
+            key = "other:" + label.casefold()
+            return {"key": key, "label": label, "kind": "number", "value": SeedpoolEventClaim._number(match.group(1))}
+
+        key = "other:" + text.casefold()
+        return {"key": key, "label": text or "其他奖励", "kind": "count", "value": 1}
+
+    @staticmethod
+    def _number(value: str) -> float:
+        return float((value or "0").replace(",", ""))
+
+    @staticmethod
+    def _format_number(value: float) -> str:
+        return f"{int(value):,}" if float(value).is_integer() else f"{value:,.2f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _format_bytes(value: float) -> str:
+        size = float(value)
+        for unit in ("B", "KiB", "MiB", "GiB"):
+            if abs(size) < 1024:
+                return f"{size:,.2f}".rstrip("0").rstrip(".") + f" {unit}"
+            size /= 1024
+        return f"{size:,.2f}".rstrip("0").rstrip(".") + " TiB"
 
     def get_command(self) -> List[Dict[str, Any]]:
         return []

@@ -273,6 +273,81 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         self.assertEqual(self.plugin.get_service(), [])
         self.assertEqual(self.plugin.get_form()[1]["cron"], Plugin.DEFAULT_CRON)
 
+    def test_tabs_separate_each_events_rewards_and_history(self):
+        for event_id, title, reward in (("6", "Dailies2", "100 BON"), ("7", "Spooktober2026", "900 BON")):
+            url = Plugin.BASE_URL + "/events/" + event_id
+            result = {"event_url": url, "event_title": title, "status": "成功", "reward": reward, "message": title + " verified",
+                      **Plugin._event(claimed_page(event_id).replace("100 BON", reward), url)}
+            with patch.object(self.plugin, "_run", return_value=[result]):
+                self.plugin.claim_rewards()
+        page = self.plugin.get_page()
+        tabs = page[1]["content"]
+        labels = [node for node in tabs if node["component"] == "label"]
+        self.assertEqual([node["text"] for node in labels], ["Dailies2", "Spooktober2026"])
+        radios = [node for node in tabs if node["component"] == "input"]
+        self.assertEqual([node["props"]["checked"] for node in radios], [True, False])
+        panels = [node for node in tabs if node["component"] == "section"]
+        for radio, label, panel, other_name, expected_reward in zip(radios, labels, panels, ["Spooktober2026", "Dailies2"], ["100 BON", "900 BON"]):
+            self.assertEqual(radio["props"]["aria-controls"], panel["props"]["id"])
+            self.assertEqual(label["props"]["for"], radio["props"]["id"])
+            css = tabs[0]["html"]
+            self.assertIn(f"#{radio['props']['id']}:checked ~ #{panel['props']['id']} {{ display: block; }}", css)
+            content = json.dumps(panel, ensure_ascii=False)
+            self.assertNotIn(other_name, content)
+            self.assertIn(expected_reward, content)
+            for heading in ("活动总天数", "已领取", "已过期未领", "今日待领取", "待开放", "奖励总计", "每日状态", "本活动执行历史"):
+                self.assertIn(heading, content)
+            totals = Plugin._reward_totals(self.data["event_snapshots"][Plugin.BASE_URL + "/events/" + ("6" if expected_reward == "100 BON" else "7")]["days"])
+            self.assertEqual(totals[0]["display"], expected_reward.split()[0])
+
+    def test_failed_activity_has_its_own_tab_and_previous_cache(self):
+        url = Plugin.BASE_URL + "/events/7"
+        previous = {"event_url": url, "event_title": "Spooktober2026", "time": "2026-10-24 09:00:00", **Plugin._event(claimed_page(), url)}
+        self.data["event_snapshots"] = {url: previous}
+        self.data["claim_logs"] = [
+            {"event_url": url, "event_title": "Spooktober2026", "time": "2026-10-25 09:00:00", "status": "失败", "message": "HTTP 403"},
+            {"event_url": Plugin.BASE_URL + "/events/6", "event_title": "Dailies2", "status": "失败", "message": "HTTP 419"},
+        ]
+        content = json.dumps(self.plugin.get_page(), ensure_ascii=False)
+        self.assertIn("HTTP 403", content)
+        self.assertIn("HTTP 419", content)
+        self.assertIn("2026-10-24 09:00:00", content)
+        self.assertIn("100 BON", content)
+        self.assertIn("暂无此活动的每日状态缓存", content)
+
+    def test_daily_status_uses_three_columns_and_current_month(self):
+        url = Plugin.BASE_URL + "/events/6"
+        snapshot = {"time": "2026-10-25 09:00:00", **Plugin._event(fixture("6"), url)}
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 25)):
+            content = self.plugin._event_page(url, snapshot, [])
+        daily_row = content[-3]
+        columns = daily_row["content"]
+        counts = [len(col["content"][0]["content"][1]["content"]) for col in columns]
+        self.assertEqual(counts, [10, 10, 11])
+        self.assertNotIn("Sep ", json.dumps(daily_row))
+
+    def test_reward_totals_use_only_this_events_claimed_days(self):
+        days = [{"status": "已领取", "rewards": ["100 BON", "2 FL Tokens", "1 GiB Upload", "2 Mystery Boxes"]},
+                {"status": "已领取", "rewards": ["50 BON", "1024 MiB Upload", "Lucky Badge"]},
+                {"status": "待开放", "rewards": ["999 BON"]}]
+        totals = {item["key"]: item["display"] for item in Plugin._reward_totals(days)}
+        self.assertEqual(totals["bon"], "150")
+        self.assertEqual(totals["fl_tokens"], "2")
+        self.assertEqual(totals["upload"], "2 GiB")
+        self.assertEqual(totals["other:mystery boxes"], "2")
+        self.assertEqual(totals["other:lucky badge"], "× 1")
+
+    def test_config_uses_blu_cron_component(self):
+        content = json.dumps(self.plugin.get_form(), ensure_ascii=False)
+        self.assertIn("VCronField", content)
+        self.assertIn("成功或失败时通知", content)
+
+    def test_index_error_stays_visible_without_activity_tabs(self):
+        self.data["claim_logs"] = [{"event_title": "活动列表", "status": "失败", "message": "Cookie 已失效"}]
+        content = json.dumps(self.plugin.get_page(), ensure_ascii=False)
+        self.assertIn("Cookie 已失效", content)
+        self.assertNotIn('"type": "radio"', content)
+
     def test_manifest_matches_plugin(self):
         manifest = json.loads((PATH.parents[2] / "package.v2.json").read_text(encoding="utf-8"))["SeedpoolEventClaim"]
         self.assertEqual(manifest["version"], Plugin.plugin_version)
