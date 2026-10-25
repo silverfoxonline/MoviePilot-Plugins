@@ -10,6 +10,20 @@ https://github.com/silverfoxonline/MoviePilot-Plugins
 
 ## 插件
 
+### SP活动奖励自动领取
+
+自动读取 `https://seedpool.org/events`，发现并逐个检查全部活动，无需填写活动编号。
+使用 MoviePilot 中 `seedpool.org` 站点的 Cookie、UA 和代理设置；也可在插件中单独填写 Cookie。
+以网页标记的当天可领卡片及其 POST 表单为准，领取后重新读取同一活动核验；已领、未来或过期奖励不提交。
+某个活动失败不会阻止其他活动领取。默认 Cron 为 `15 */6 * * *`，按 MP2 时区每 6 小时检查一次，
+也可勾选“立即运行一次”。请求失败后在下次运行重新读取状态，不直接重放领取请求。
+
+详情页展示各活动的已领天数、当前月每日状态与奖励，以及最近 100 条执行记录，仅访问本地缓存。
+仅有成功或失败结果时发送通知；没有可领奖励时保持安静。不会自动补领网页不允许领取的过期奖励。
+
+版本 `1.0.0`。参考本仓库 BLU 活动奖励插件，适配 Seedpool 的 `/events/{id}/claims` 表单。
+离线测试：`python -m unittest discover -s tests -p test_seedpooleventclaim.py -v`。
+
 ### 下载任务分类与标签-改版
 
 基于叮叮当的“下载任务分类与标签”2.6，保留原插件功能，并统一以下站点标签：
