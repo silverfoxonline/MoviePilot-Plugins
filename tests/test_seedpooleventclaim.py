@@ -24,7 +24,7 @@ class Scheduler:
     def remove_all_jobs(self):
         self.jobs.clear()
 
-    def shutdown(self):
+    def shutdown(self, wait=True):
         self.running = False
 
     def get_job(self, job_id):
@@ -476,6 +476,31 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         self.assertEqual(self.plugin._scheduler.jobs, [first])
         self.plugin._schedule_retry([{"status": "成功"}], 0)
         self.assertEqual(self.plugin._scheduler.jobs, [])
+
+    def test_stop_detaches_scheduler_without_waiting_for_running_callback(self):
+        scheduler = Mock(running=True)
+        def shutdown(**kwargs):
+            self.assertFalse(kwargs["wait"])
+            self.assertIsNone(self.plugin._scheduler)
+            self.assertTrue(self.plugin._stopping)
+        scheduler.shutdown.side_effect = shutdown
+        self.plugin._scheduler = scheduler
+        self.plugin.stop_service()
+        scheduler.shutdown.assert_called_once_with(wait=False)
+        scheduler.remove_all_jobs.assert_not_called()
+        self.plugin.stop_service()
+        scheduler.shutdown.assert_called_once()
+
+    def test_finishing_callback_cannot_recreate_retry_scheduler_after_stop(self):
+        self.plugin.init_plugin({"max_retries": 2})
+        self.plugin.stop_service()
+        with patch.object(PLUGIN_MODULE, "BackgroundScheduler") as factory:
+            self.plugin._schedule_retry([{"status": "待开放", "message": "尚未开放"}], 0)
+            factory.assert_not_called()
+        self.plugin.init_plugin({"max_retries": 2})
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 25, 9)):
+            self.plugin._schedule_retry([{"status": "待开放", "message": "尚未开放"}], 0)
+        self.assertTrue(self.plugin._scheduler.running)
 
     def test_claimable_site_card_still_wins_over_local_date(self):
         url = Plugin.BASE_URL + "/events/7"

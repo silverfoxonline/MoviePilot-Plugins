@@ -28,7 +28,7 @@ https://github.com/silverfoxonline/MoviePilot-Plugins
 总计保留最近 100 条记录。切换标签仅访问本地缓存，不触发站点请求，也不影响后台处理全部活动。
 仅有成功或失败结果时发送通知；没有可领奖励时保持安静。不会自动补领网页不允许领取的过期奖励。
 
-版本 `1.0.3`。修复立即运行调度并增加运行状态记录；保留按活动名称分标签的统计界面，兼容旧版配置与缓存。
+版本 `1.0.4`。修复保存配置、更新插件与补查回调之间的调度器死锁；保留按活动名称分标签的统计界面，兼容旧版配置与缓存。
 参考本仓库 BLU 活动奖励插件，适配 Seedpool 的 `/events/{id}/claims` 表单。
 离线测试：`python -m unittest discover -s tests -p test_seedpooleventclaim.py -v`。
 

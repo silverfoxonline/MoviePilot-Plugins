@@ -25,7 +25,7 @@ class SeedpoolEventClaim(_PluginBase):
     plugin_name = "SP活动奖励自动领取"
     plugin_desc = "自动发现 Seedpool 全部活动，逐个领取当天奖励"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "seedpooleventclaim_"
@@ -48,6 +48,8 @@ class SeedpoolEventClaim(_PluginBase):
     _retry_interval_hours = RETRY_INTERVAL_HOURS
     _max_retries = MAX_RETRIES
     _scheduler = None
+    _scheduler_lock = threading.RLock()
+    _stopping = False
     _run_lock = threading.Lock()
 
     def init_plugin(self, config: dict = None):
@@ -61,6 +63,8 @@ class SeedpoolEventClaim(_PluginBase):
         self._random_delay = self._config_int(config, "random_delay", 0, 0, 60)
         self._retry_interval_hours = self._config_int(config, "retry_interval_hours", self.RETRY_INTERVAL_HOURS, 1, 24)
         self._max_retries = self._config_int(config, "max_retries", self.MAX_RETRIES, 0, 3)
+        with self._scheduler_lock:
+            self._stopping = False
 
     @staticmethod
     def _config_int(config: dict, key: str, default: int, minimum: int, maximum: int) -> int:
@@ -103,11 +107,14 @@ class SeedpoolEventClaim(_PluginBase):
         return services
 
     def stop_service(self):
-        if self._scheduler:
-            self._scheduler.remove_all_jobs()
-            if self._scheduler.running:
-                self._scheduler.shutdown()
+        # APScheduler 在 shutdown 中持有 jobstores 锁；等待正在运行的
+        # 领取回调会与回调中的 get_job 互锁。先移交引用，再非阻塞退出。
+        with self._scheduler_lock:
+            self._stopping = True
+            scheduler = self._scheduler
             self._scheduler = None
+            if scheduler and scheduler.running:
+                scheduler.shutdown(wait=False)
 
     @classmethod
     def _safe_url(cls, value: str, base: str = "") -> str:
@@ -362,6 +369,12 @@ class SeedpoolEventClaim(_PluginBase):
             self._run_lock.release()
 
     def _schedule_retry(self, results: List[dict], used: int):
+        with self._scheduler_lock:
+            if self._stopping:
+                return
+            self._schedule_retry_locked(results, used)
+
+    def _schedule_retry_locked(self, results: List[dict], used: int):
         """同一批活动共享补查任务；Cron 重复执行不重置当日次数或推迟已有任务。"""
         pending = [result for result in results if result["status"] == "待开放"]
         job_id = "SeedpoolEventClaimRetry"
