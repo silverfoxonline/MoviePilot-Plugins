@@ -24,7 +24,7 @@ class SeedpoolEventClaim(_PluginBase):
     plugin_name = "SP活动奖励自动领取"
     plugin_desc = "自动发现 Seedpool 全部活动，逐个领取当天奖励"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "seedpooleventclaim_"
@@ -36,10 +36,15 @@ class SeedpoolEventClaim(_PluginBase):
     DEFAULT_CRON = "15 */6 * * *"
     MAX_HISTORY = 100
     REQUEST_TIMEOUT = 30
+    RETRY_INTERVAL_HOURS = 6
+    MAX_RETRIES = 2
     _enabled = False
     _notify = True
     _cron = DEFAULT_CRON
     _cookie = ""
+    _random_delay = 0
+    _retry_interval_hours = RETRY_INTERVAL_HOURS
+    _max_retries = MAX_RETRIES
     _scheduler = None
     _run_lock = threading.Lock()
 
@@ -50,6 +55,9 @@ class SeedpoolEventClaim(_PluginBase):
         self._notify = config.get("notify", True)
         self._cron = config.get("cron") or self.DEFAULT_CRON
         self._cookie = (config.get("cookie") or "").strip()
+        self._random_delay = self._config_int(config, "random_delay", 0, 0, 60)
+        self._retry_interval_hours = self._config_int(config, "retry_interval_hours", self.RETRY_INTERVAL_HOURS, 1, 24)
+        self._max_retries = self._config_int(config, "max_retries", self.MAX_RETRIES, 0, 3)
         if config.get("onlyonce"):
             self.update_config({**config, "onlyonce": False})
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -59,6 +67,13 @@ class SeedpoolEventClaim(_PluginBase):
                 name="SP活动奖励立即领取",
             )
             self._scheduler.start()
+
+    @staticmethod
+    def _config_int(config: dict, key: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            return min(max(int(config.get(key, default)), minimum), maximum)
+        except (ValueError, TypeError):
+            return default
 
     @staticmethod
     def _now():
@@ -71,9 +86,11 @@ class SeedpoolEventClaim(_PluginBase):
         if not self._enabled:
             return []
         try:
+            trigger = CronTrigger.from_crontab(self._cron, timezone=settings.TZ)
+            trigger.jitter = self._random_delay * 60
             return [{
                 "id": "SeedpoolEventClaim", "name": self.plugin_name,
-                "trigger": CronTrigger.from_crontab(self._cron, timezone=settings.TZ),
+                "trigger": trigger,
                 "func": self.claim_rewards, "kwargs": {},
             }]
         except (ValueError, TypeError):
@@ -219,6 +236,10 @@ class SeedpoolEventClaim(_PluginBase):
                 return {**result, "status": "失败", "message": "可领卡片缺少有效表单或 CSRF token"}
             if any(day["status"] == "状态未知" for day in progress["days"]):
                 return {**result, "status": "失败", "message": "存在无法识别的奖励状态，请检查页面"}
+            today = self._now()
+            month = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[today.month - 1]
+            if any(day["date"] == f"{month} {today.day}" and day["status"] == "待开放" for day in progress["days"]):
+                return {**result, "status": "待开放", "message": "今天的活动奖励尚未开放领取"}
             return {**result, "status": "无可领奖励", "message": "当前没有可领取表单（已领、未开放或已结束）"}
         self._request(session, "POST", claim["url"], data=claim["data"], headers={
             "Origin": self.BASE_URL, "Referer": url,
@@ -271,15 +292,28 @@ class SeedpoolEventClaim(_PluginBase):
         message = str(err) if isinstance(err, ValueError) else f"请求或处理异常（{type(err).__name__}），下次运行将重新检查"
         return {"status": "失败", "message": message}
 
-    def claim_rewards(self):
+    def claim_rewards(self, expected_date: str = ""):
+        now = self._now()
+        today = now.date().isoformat()
+        if expected_date and expected_date != today:
+            logger.info("[SeedpoolEventClaim] 补查已跨日，跳过过期任务")
+            return
         if not self._run_lock.acquire(blocking=False):
             logger.info("[SeedpoolEventClaim] 已有任务运行，本次跳过")
             return
         try:
+            usage = self.get_data("retry_usage") or {}
+            used = usage.get("count", 0) if usage.get("date") == today else 0
+            if expected_date:
+                if used >= self._max_retries:
+                    return
+                used += 1
+                self.save_data("retry_usage", {"date": today, "count": used})
             try:
                 results = self._run()
             except Exception as err:
                 results = [{"event_title": "活动列表", **self._failure(err)}]
+            self._schedule_retry(results, used)
             checked = self._now().strftime("%Y-%m-%d %H:%M:%S")
             snapshots = self.get_data("event_snapshots") or {}
             records = []
@@ -308,6 +342,42 @@ class SeedpoolEventClaim(_PluginBase):
         finally:
             self._run_lock.release()
 
+    def _schedule_retry(self, results: List[dict], used: int):
+        """同一批活动共享补查任务；Cron 重复执行不重置当日次数或推迟已有任务。"""
+        pending = [result for result in results if result["status"] == "待开放"]
+        job_id = "SeedpoolEventClaimRetry"
+        existing = self._scheduler.get_job(job_id) if self._scheduler else None
+        if not pending or not self._max_retries:
+            if existing and (not self._max_retries or not any(result["status"] == "失败" for result in results)):
+                self._scheduler.remove_job(job_id)
+            return
+        now = self._now()
+        run_date = now + datetime.timedelta(hours=self._retry_interval_hours)
+        if used >= self._max_retries or (not existing and run_date.date() != now.date()):
+            if existing:
+                self._scheduler.remove_job(job_id)
+            for result in pending:
+                result["status"] = "失败"
+                result["message"] += "；今日补查次数已用尽或已临近跨日"
+            return
+        try:
+            if not self._scheduler:
+                self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+            if not existing:
+                self._scheduler.add_job(
+                    func=self.claim_rewards, trigger="date", run_date=run_date,
+                    kwargs={"expected_date": now.date().isoformat()},
+                    id=job_id, name="SP活动奖励未开放补查",
+                )
+            if not self._scheduler.running:
+                self._scheduler.start()
+            for result in pending:
+                result["message"] += "；已安排未开放补查"
+        except Exception as err:
+            for result in pending:
+                result["status"] = "失败"
+                result["message"] += f"；安排补查失败（{type(err).__name__}）"
+
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         fields = [
             ("VSwitch", "enabled", "启用插件", {}),
@@ -323,6 +393,16 @@ class SeedpoolEventClaim(_PluginBase):
                       f"当前时区：{settings.TZ}；默认每 6 小时检查，领取日期以站点卡片为准。"}]
                     if model == "cron" else []),
             } for component, model, label, props in fields]},
+            {"component": "VRow", "content": [{
+                "component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{
+                    "component": "VTextField", "props": {"model": model, "label": label, "type": "number",
+                        "min": minimum, "max": maximum, "hint": hint},
+                }],
+            } for model, label, minimum, maximum, hint in (
+                ("random_delay", "随机延迟（分钟）", 0, 60, "Cron 到点后随机延迟 0～N 分钟；0 表示关闭。"),
+                ("retry_interval_hours", "未开放补查间隔（小时）", 1, 24, "默认 6 小时；仅当天奖励未开放时补查，跨日自动跳过。"),
+                ("max_retries", "当日最多补查次数", 0, 3, "默认 2 次；0 表示不补查，不计 Cron 和立即运行；多个活动共用一次补查。"),
+            )]},
             {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [
                 {"component": "VTextField", "props": {
                     "model": "cookie", "label": "SP Cookie（可选）", "type": "password",
@@ -331,8 +411,9 @@ class SeedpoolEventClaim(_PluginBase):
                 }},
             ]}]},
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text":
-                "自动从 /events 获取所有活动并分别领取，以网页可领卡片为准。每次先检查再提交，已领取不重复提交；单个活动失败不影响其他活动。详情页只展示缓存，不访问站点。"}},
-        ]}], {"enabled": False, "notify": True, "onlyonce": False, "cron": self.DEFAULT_CRON, "cookie": ""}
+                "自动从 /events 获取所有活动并分别领取，以网页可领卡片为准。随机延迟只影响 Cron；补查会重新检查全部活动，已领取不重复提交。单个活动失败不影响其他活动。详情页只展示缓存，不访问站点。"}},
+        ]}], {"enabled": False, "notify": True, "onlyonce": False, "cron": self.DEFAULT_CRON, "cookie": "",
+              "random_delay": 0, "retry_interval_hours": self.RETRY_INTERVAL_HOURS, "max_retries": self.MAX_RETRIES}
 
     @staticmethod
     def _table(headers: tuple, keys: tuple, rows: List[dict]) -> dict:

@@ -27,6 +27,12 @@ class Scheduler:
     def shutdown(self):
         self.running = False
 
+    def get_job(self, job_id):
+        return next((job for job in self.jobs if job.get("id") == job_id), None)
+
+    def remove_job(self, job_id):
+        self.jobs = [job for job in self.jobs if job.get("id") != job_id]
+
 
 def module(name, **attrs):
     result = types.ModuleType(name)
@@ -163,7 +169,8 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         for state in ("past", "future"):
             session = Mock()
             session.request.return_value = response(fixture("7").replace("today-unclaimed", state), url)
-            self.assertEqual(self.plugin._claim_event(session, {"event_url": url})["status"], "无可领奖励")
+            with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 25)):
+                self.assertEqual(self.plugin._claim_event(session, {"event_url": url})["status"], "待开放" if state == "future" else "无可领奖励")
             self.assertEqual(session.request.call_count, 1)
 
     def test_bad_form_is_failure_not_no_rewards(self):
@@ -341,6 +348,82 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         content = json.dumps(self.plugin.get_form(), ensure_ascii=False)
         self.assertIn("VCronField", content)
         self.assertIn("成功或失败时通知", content)
+
+    def test_three_blu_options_are_configurable_and_no_event_url(self):
+        self.plugin.init_plugin({"random_delay": "30", "retry_interval_hours": "6", "max_retries": "1"})
+        self.assertEqual((self.plugin._random_delay, self.plugin._retry_interval_hours, self.plugin._max_retries), (30, 6, 1))
+        form, defaults = self.plugin.get_form()
+        text = json.dumps(form, ensure_ascii=False)
+        for key in ("random_delay", "retry_interval_hours", "max_retries"):
+            self.assertIn(key, text)
+            self.assertIn(key, defaults)
+        self.assertNotIn('"model": "event_url"', text)
+        self.plugin.init_plugin({"random_delay": "invalid", "retry_interval_hours": None, "max_retries": 0})
+        self.assertEqual((self.plugin._random_delay, self.plugin._retry_interval_hours, self.plugin._max_retries), (0, 6, 0))
+        self.plugin.init_plugin({"random_delay": 999, "retry_interval_hours": -1, "max_retries": 99})
+        self.assertEqual((self.plugin._random_delay, self.plugin._retry_interval_hours, self.plugin._max_retries), (60, 1, 3))
+
+    def test_cron_jitter_does_not_delay_immediate_run(self):
+        now = datetime.datetime(2026, 10, 25, 9)
+        with patch.object(self.plugin, "_now", return_value=now):
+            self.plugin.init_plugin({"enabled": True, "onlyonce": True, "random_delay": 30})
+        self.assertEqual(self.plugin._scheduler.jobs[0]["run_date"], now + datetime.timedelta(seconds=3))
+        trigger = Mock()
+        with patch.object(PLUGIN_MODULE.CronTrigger, "from_crontab", return_value=trigger):
+            self.assertEqual(self.plugin.get_service()[0]["trigger"].jitter, 1800)
+
+    def test_pending_events_share_one_retry_and_daily_limit_survives_cron(self):
+        self.plugin.init_plugin({"max_retries": 1, "retry_interval_hours": 6})
+        now = datetime.datetime(2026, 10, 25, 9)
+        pending = lambda: [{"event_title": title, "status": "待开放", "message": "尚未开放"} for title in ("Dailies2", "Spooktober2026")]
+        with patch.object(self.plugin, "_now", return_value=now), patch.object(self.plugin, "_run", side_effect=pending):
+            self.plugin.claim_rewards()
+            scheduler = self.plugin._scheduler
+            self.assertEqual(len(scheduler.jobs), 1)
+            self.assertEqual(scheduler.jobs[0]["run_date"], now + datetime.timedelta(hours=6))
+            self.assertEqual(scheduler.jobs[0]["kwargs"], {"expected_date": "2026-10-25"})
+            self.plugin.claim_rewards()
+            self.assertEqual(len(scheduler.jobs), 1)
+        # APScheduler removes a date job before its callback runs.
+        scheduler.remove_job("SeedpoolEventClaimRetry")
+        with patch.object(self.plugin, "_now", return_value=now + datetime.timedelta(hours=6)), patch.object(self.plugin, "_run", side_effect=pending):
+            self.plugin.claim_rewards(expected_date="2026-10-25")
+            self.assertEqual(self.data["retry_usage"], {"date": "2026-10-25", "count": 1})
+            self.assertEqual(scheduler.jobs, [])
+            self.plugin.claim_rewards()
+            self.assertEqual(scheduler.jobs, [])
+        self.assertIn("补查次数已用尽", self.data["claim_logs"][-1]["message"])
+
+    def test_retries_skip_cross_day_and_zero_disables_them(self):
+        self.plugin.init_plugin({"max_retries": 0})
+        pending = [{"status": "待开放", "message": "尚未开放"}]
+        self.plugin._schedule_retry(pending, 0)
+        self.assertIsNone(self.plugin._scheduler)
+        self.plugin._max_retries = 2
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 25, 22)):
+            self.plugin._schedule_retry(pending, 0)
+            self.assertIsNone(self.plugin._scheduler)
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 26, 1)), patch.object(self.plugin, "_run") as run:
+            self.plugin.claim_rewards(expected_date="2026-10-25")
+            run.assert_not_called()
+
+    def test_existing_retry_keeps_earlier_time_and_cancels_when_done(self):
+        self.plugin.init_plugin({"max_retries": 2, "retry_interval_hours": 6})
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 25, 16)):
+            self.plugin._schedule_retry([{"status": "待开放", "message": "尚未开放"}], 0)
+        first = dict(self.plugin._scheduler.jobs[0])
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 25, 20)):
+            self.plugin._schedule_retry([{"status": "待开放", "message": "尚未开放"}], 0)
+        self.assertEqual(self.plugin._scheduler.jobs, [first])
+        self.plugin._schedule_retry([{"status": "成功"}], 0)
+        self.assertEqual(self.plugin._scheduler.jobs, [])
+
+    def test_claimable_site_card_still_wins_over_local_date(self):
+        url = Plugin.BASE_URL + "/events/7"
+        session = Mock()
+        session.request.side_effect = [response(fixture("7"), url), response("<html>ok</html>", url), response(claimed_page(), url)]
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 26, 1)):
+            self.assertEqual(self.plugin._claim_event(session, {"event_url": url})["status"], "成功")
 
     def test_index_error_stays_visible_without_activity_tabs(self):
         self.data["claim_logs"] = [{"event_title": "活动列表", "status": "失败", "message": "Cookie 已失效"}]
