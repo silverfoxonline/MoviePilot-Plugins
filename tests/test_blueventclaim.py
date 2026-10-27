@@ -9,6 +9,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 
 def _module(name, **attributes):
@@ -84,6 +85,45 @@ BLUEventClaim = MODULE.BLUEventClaim
 
 
 class BLUEventClaimParserTest(unittest.TestCase):
+    def test_claim_notification_uses_current_event_snapshot(self):
+        plugin = BLUEventClaim()
+        plugin._event_url = "https://blutopia.cc/giveaways/4"
+        plugin._notify = True
+        stored = {}
+        plugin.get_data = stored.get
+        plugin.save_data = lambda key, value: stored.update({key: value})
+        plugin.post_message = Mock()
+        days = [{"date": "Oct 27", "status": "已领取", "rewards": ["100 BON"]},
+                {"date": "Oct 28", "status": "待开放", "rewards": []}]
+        plugin._do_claim = lambda: {"event_title": "秋季活动", "status": "成功", "message": "领取成功",
+                                    "reward": "100 BON", **BLUEventClaim._summarize_days(days)}
+        plugin._claim_reward()
+        text = plugin.post_message.call_args.kwargs["text"]
+        self.assertIn("秋季活动", text)
+        self.assertIn("领取内容：100 BON", text)
+        self.assertIn("已领取/过期/待开放：1/0/1", text)
+
+    def test_notification_format_and_unknown_failure(self):
+        days = [
+            {"date": "Oct 26", "status": "已过期未领", "rewards": []},
+            {"date": "Oct 27", "status": "已领取", "rewards": ["100 GiB Upload"]},
+            {"date": "Oct 28", "status": "待开放", "rewards": []},
+        ]
+        snapshot = {"event_title": "Halloween", "updated_at": "2026-10-27 09:00:00",
+                    **BLUEventClaim._summarize_days(days)}
+        record = {"status": "成功", "reward": "100 GiB Upload"}
+        text = BLUEventClaim._notification_text(record, snapshot)
+        self.assertIn("获取到 1 个活动", text)
+        self.assertIn("Halloween", text)
+        self.assertIn("领取内容：100 GiB Upload", text)
+        self.assertIn("已领取/过期/待开放：1/1/1", text)
+        self.assertEqual(BLUEventClaim._notification_activity_status(snapshot, datetime.date(2026, 10, 27)), "进行中")
+        self.assertEqual(BLUEventClaim._notification_activity_status(snapshot, datetime.date(2026, 10, 29)), "已截止")
+        failed = BLUEventClaim._notification_text({"status": "失败", "message": "Cookie 已失效"}, {})
+        self.assertIn("活动数据未获取", failed)
+        self.assertIn("失败原因：Cookie 已失效", failed)
+        self.assertIn("暂无数据", failed)
+
     def test_claimed_page_and_reward(self):
         page = """
         <meta name="csrf-token" content="token-value">

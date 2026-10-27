@@ -25,7 +25,7 @@ class SeedpoolEventClaim(_PluginBase):
     plugin_name = "SP活动奖励自动领取"
     plugin_desc = "自动发现 Seedpool 全部活动，逐个领取当天奖励"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "seedpooleventclaim_"
@@ -365,8 +365,8 @@ class SeedpoolEventClaim(_PluginBase):
             logger.info(f"[SeedpoolEventClaim] 执行结束：{summary}")
             if self._notify and any(r["status"] in ("成功", "失败") for r in results):
                 self.post_message(
-                    mtype=NotificationType.SiteMessage, title="【SP活动奖励】" + summary,
-                    text="\n".join(f"{r['event_title']}：{r['status']}\n{r.get('reward') or r['message']}" for r in results),
+                    mtype=NotificationType.SiteMessage, title="【🎁 SP活动奖励】",
+                    text=self._notification_text(results),
                 )
         finally:
             self._run_lock.release()
@@ -544,6 +544,32 @@ class SeedpoolEventClaim(_PluginBase):
         if today < start:
             return "⏳", "尚未开始"
         return "🟢", "进行中"
+
+    def _notification_text(self, results: List[dict]) -> str:
+        """按活动汇总本次结果，不用旧缓存冒充本次数据。"""
+        events = [result for result in results if result.get("event_url")]
+        errors = [result for result in results if not result.get("event_url")]
+        lines = [f"📋 获取到 {len(events)} 个活动" if not errors else "📋 活动列表获取失败"]
+        for event in events:
+            icon, activity_status = self._activity_status(event)
+            lines.extend(["━━━━━━━━━━━━━━", f"🎉 {event.get('event_title') or 'SP Event'}",
+                          f"{icon} 状态：{'已截止' if activity_status == '已过期' else activity_status}"])
+            if activity_status != "已过期":
+                lines.append(f"✨ 本次执行：{event.get('status') or '未知'}")
+                lines.append(f"🎁 领取内容：{event.get('reward') or '—'}")
+                days = event.get("days") or []
+                if days:
+                    counts = [sum(day.get("status") == status for day in days)
+                              for status in ("已领取", "已过期未领", "待开放")]
+                    lines.append(f"📊 已领取/过期/待开放：{counts[0]}/{counts[1]}/{counts[2]}")
+                else:
+                    lines.append("📊 已领取/过期/待开放：暂无数据")
+            if event.get("status") == "失败":
+                lines.append(f"⚠️ 失败原因：{event.get('message') or '未知错误'}")
+        for error in errors:
+            lines.extend(["━━━━━━━━━━━━━━", f"⚠️ 失败原因：{error.get('message') or '未知错误'}"])
+        lines.append("━━━━━━━━━━━━━━")
+        return "\n".join(lines)
 
     def _event_page(self, url: str, snapshot: dict, records: List[dict]) -> List[dict]:
         """各活动独立沿用 BLU 的摘要、奖励卡片及三列每日状态。"""

@@ -98,6 +98,42 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         self.plugin.update_config = Mock(side_effect=lambda config: self.config.update(config) or True)
         self.plugin.post_message = Mock()
 
+    def test_notification_groups_activities_and_preserves_errors(self):
+        results = [
+            {"event_url": "https://seedpool.org/events/1", "event_title": "活动一",
+             "starts_at": "2026-10-01", "ends_at": "2026-10-31", "status": "成功", "reward": "3 GiB",
+             "days": [{"status": "已领取"}, {"status": "已过期未领"}, {"status": "待开放"}]},
+            {"event_url": "https://seedpool.org/events/2", "event_title": "活动二",
+             "starts_at": "2026-09-01", "ends_at": "2026-09-30", "status": "无可领奖励"},
+            {"event_url": "https://seedpool.org/events/3", "event_title": "活动三",
+             "starts_at": "2026-10-01", "ends_at": "2026-10-31", "status": "失败", "message": "获取失败"},
+        ]
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 27)):
+            text = self.plugin._notification_text(results)
+        self.assertIn("获取到 3 个活动", text)
+        self.assertIn("领取内容：3 GiB", text)
+        self.assertIn("已领取/过期/待开放：1/1/1", text)
+        self.assertIn("⛔ 状态：已截止", text)
+        self.assertIn("失败原因：获取失败", text)
+        failed = self.plugin._notification_text([{"status": "失败", "message": "Cookie 已失效"}])
+        self.assertIn("活动列表获取失败", failed)
+        self.assertIn("Cookie 已失效", failed)
+
+    def test_claim_sends_grouped_notification(self):
+        result = {"event_url": "https://seedpool.org/events/7", "event_title": "秋季活动",
+                  "starts_at": "2026-10-01", "ends_at": "2026-10-31", "status": "成功",
+                  "message": "领取成功", "reward": "2 FL Tokens",
+                  "days": [{"date": "Oct 27", "status": "已领取", "rewards": ["2 FL Tokens"]}],
+                  "total_days": 1, "claimed_days": 1}
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 27)):
+            with patch.object(self.plugin, "_run", return_value=[result]):
+                self.plugin.claim_rewards()
+        text = self.plugin.post_message.call_args.kwargs["text"]
+        self.assertIn("获取到 1 个活动", text)
+        self.assertIn("秋季活动", text)
+        self.assertIn("领取内容：2 FL Tokens", text)
+        self.assertIn("已领取/过期/待开放：1/0/0", text)
+
     def test_real_index_discovers_all_events_including_ended_but_active(self):
         events = Plugin._events(fixture("index"))
         self.assertEqual([event["event_title"] for event in events], ["Dailies2", "Spooktober2026", "50PiB.Celebration"])
@@ -164,7 +200,8 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         url = Plugin.BASE_URL + "/events/7"
         session = Mock()
         session.request.return_value = response(claimed_page(), url)
-        self.assertEqual(self.plugin._claim_event(session, {"event_url": url})["status"], "无可领奖励")
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 25)):
+            self.assertEqual(self.plugin._claim_event(session, {"event_url": url})["status"], "无可领奖励")
         self.assertEqual(session.request.call_count, 1)
 
     def test_unverified_post_is_failure(self):

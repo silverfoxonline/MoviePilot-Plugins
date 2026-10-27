@@ -27,7 +27,7 @@ class BLUEventClaim(_PluginBase):
     plugin_name = "BLU活动奖励自动领取"
     plugin_desc = "通过 BLU 网页接口自动领取当天 Event 奖励"
     plugin_icon = "https://blutopia.cc/favicon.svg"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "blueventclaim_"
@@ -185,6 +185,7 @@ class BLUEventClaim(_PluginBase):
             "total_days": result.get("total_days"),
             "claimed_days": result.get("claimed_days"),
         }
+        snapshot = {}
         if result.get("days") is not None:
             snapshots = self.get_data("event_snapshots") or {}
             previous = snapshots.get(record["event_url"]) or {}
@@ -195,7 +196,7 @@ class BLUEventClaim(_PluginBase):
             progress = self._summarize_days(merged_days)
             record["total_days"] = progress["total_days"]
             record["claimed_days"] = progress["claimed_days"]
-            snapshots[record["event_url"]] = {
+            snapshot = snapshots[record["event_url"]] = {
                 "event_url": record["event_url"],
                 "event_title": result.get("event_title", "BLU Event"),
                 "updated_at": record["time"],
@@ -215,15 +216,47 @@ class BLUEventClaim(_PluginBase):
             logger.info(log_message)
 
         if self._notify and record["status"] in ("成功", "失败"):
-            reward_text = f"\n奖励：{record['reward']}" if record["reward"] else ""
-            progress_text = ""
-            if record["total_days"] is not None and record["claimed_days"] is not None:
-                progress_text = f"\n活动进度：{record['claimed_days']} / {record['total_days']} 天"
             self.post_message(
                 mtype=NotificationType.SiteMessage,
-                title=f"【BLU活动奖励】{record['status']}",
-                text=f"{record['message']}{reward_text}{progress_text}",
+                title="【🎁 BLU活动奖励】",
+                text=self._notification_text(record, snapshot),
             )
+
+    @classmethod
+    def _notification_text(cls, record: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
+        days = snapshot.get("days") or []
+        lines = ["📋 获取到 1 个活动" if days else "📋 活动数据未获取",
+                 "━━━━━━━━━━━━━━",
+                 f"🎉 {snapshot.get('event_title') or 'BLU Event'}"]
+        status = cls._notification_activity_status(snapshot)
+        lines.append(f"{'🟢' if status == '进行中' else '⛔' if status == '已截止' else '❔'} 状态：{status}")
+        if status != "已截止":
+            lines.append(f"✨ 本次执行：{record.get('status') or '未知'}")
+            lines.append(f"🎁 领取内容：{record.get('reward') or '—'}")
+            if days:
+                lines.append(f"📊 已领取/过期/待开放：{snapshot['claimed_days']}/{snapshot['expired_days']}/{snapshot['future_days']}")
+            else:
+                lines.append("📊 已领取/过期/待开放：暂无数据")
+        if record.get("status") == "失败":
+            lines.append(f"⚠️ 失败原因：{record.get('message') or '未知错误'}")
+        lines.append("━━━━━━━━━━━━━━")
+        return "\n".join(lines)
+
+    @classmethod
+    def _notification_activity_status(cls, snapshot: Dict[str, Any], today: Optional[datetime.date] = None) -> str:
+        """按奖励卡片日期判断活动周期，无法判断时保留未知状态。"""
+        days = snapshot.get("days") or []
+        if not days:
+            return "未知"
+        try:
+            start = datetime.datetime.strptime(cls._event_start_date(snapshot), "%Y/%m/%d").date()
+            last = datetime.datetime.strptime(f"{days[-1]['date']} {start.year}", "%b %d %Y").date()
+            if last < start:
+                last = last.replace(year=last.year + 1)
+        except (ValueError, KeyError, TypeError):
+            return "未知"
+        today = today or datetime.datetime.now(pytz.timezone("UTC")).date()
+        return "尚未开始" if today < start else "已截止" if today > last else "进行中"
 
     def _do_claim(self, today: Optional[datetime.date] = None) -> Dict[str, Any]:
         """读取活动页并在需要时提交一次领取请求。"""
