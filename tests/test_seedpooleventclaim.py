@@ -98,6 +98,25 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         self.plugin.update_config = Mock(side_effect=lambda config: self.config.update(config) or True)
         self.plugin.post_message = Mock()
 
+    def test_manual_run_notifies_no_reward_but_scheduled_stays_quiet(self):
+        result = {"event_url": "https://seedpool.org/events/7", "event_title": "秋季活动",
+                  "starts_at": "2026-10-01", "ends_at": "2026-10-31", "status": "无可领奖励",
+                  "message": "已领取", "days": [{"date": "Oct 27", "status": "已领取", "rewards": []}],
+                  "total_days": 1, "claimed_days": 1}
+        self.plugin.init_plugin({"onlyonce": True, "notify": True})
+        self.config["onlyonce"] = True
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 27)):
+            with patch.object(self.plugin, "_run", return_value=[result]):
+                self.plugin.claim_rewards(onlyonce=True)
+                self.assertIn("本次执行：无可领奖励", self.plugin.post_message.call_args.kwargs["text"])
+                self.plugin.post_message.reset_mock()
+                self.plugin.claim_rewards()
+                self.plugin.post_message.assert_not_called()
+                self.config["onlyonce"] = True
+                self.plugin._notify = False
+                self.plugin.claim_rewards(onlyonce=True)
+                self.plugin.post_message.assert_not_called()
+
     def test_notification_groups_activities_and_preserves_errors(self):
         results = [
             {"event_url": "https://seedpool.org/events/1", "event_title": "活动一",

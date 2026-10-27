@@ -27,7 +27,7 @@ class BLUEventClaim(_PluginBase):
     plugin_name = "BLU活动奖励自动领取"
     plugin_desc = "通过 BLU 网页接口自动领取当天 Event 奖励"
     plugin_icon = "https://blutopia.cc/favicon.svg"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "blueventclaim_"
@@ -84,6 +84,7 @@ class BLUEventClaim(_PluginBase):
                 trigger="date",
                 run_date=datetime.datetime.now(tz=pytz.timezone(settings.TZ))
                 + datetime.timedelta(seconds=3),
+                kwargs={"onlyonce": True},
                 name="BLU活动奖励立即领取",
             )
             self._scheduler.start()
@@ -134,7 +135,7 @@ class BLUEventClaim(_PluginBase):
             "cookie": self._cookie,
         })
 
-    def _claim_reward(self, retry_count: int = 0, expected_date: str = ""):
+    def _claim_reward(self, retry_count: int = 0, expected_date: str = "", onlyonce: bool = False):
         """串行执行一次领取，并保存可审计的结果。"""
         now = datetime.datetime.now(pytz.timezone(settings.TZ))
         if expected_date and now.date().isoformat() != expected_date:
@@ -215,7 +216,7 @@ class BLUEventClaim(_PluginBase):
         else:
             logger.info(log_message)
 
-        if self._notify and record["status"] in ("成功", "失败"):
+        if self._notify and (onlyonce or record["status"] in ("成功", "失败")):
             self.post_message(
                 mtype=NotificationType.SiteMessage,
                 title="【🎁 BLU活动奖励】",
@@ -663,7 +664,7 @@ class BLUEventClaim(_PluginBase):
                     "component": "VCol",
                     "props": {"cols": 12, "md": 3},
                     "content": [{"component": "VSwitch", "props": {
-                        "model": "notify", "label": "成功或失败时通知",
+                        "model": "notify", "label": "成功或失败时通知（立即运行也通知）",
                     }}],
                 }, {
                     "component": "VCol",

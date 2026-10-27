@@ -25,7 +25,7 @@ class SeedpoolEventClaim(_PluginBase):
     plugin_name = "SP活动奖励自动领取"
     plugin_desc = "自动发现 Seedpool 全部活动，逐个领取当天奖励"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "seedpooleventclaim_"
@@ -363,7 +363,7 @@ class SeedpoolEventClaim(_PluginBase):
             summary = f"检查 {len(results)} 个活动，成功 {sum(r['status'] == '成功' for r in results)}，失败 {sum(r['status'] == '失败' for r in results)}"
             self.save_data("last_run", {"time": checked, "message": summary})
             logger.info(f"[SeedpoolEventClaim] 执行结束：{summary}")
-            if self._notify and any(r["status"] in ("成功", "失败") for r in results):
+            if self._notify and (onlyonce or any(r["status"] in ("成功", "失败") for r in results)):
                 self.post_message(
                     mtype=NotificationType.SiteMessage, title="【🎁 SP活动奖励】",
                     text=self._notification_text(results),
@@ -417,7 +417,7 @@ class SeedpoolEventClaim(_PluginBase):
         fields = [
             ("VSwitch", "enabled", "启用插件", {}),
             ("VSwitch", "onlyonce", "立即运行一次", {}),
-            ("VSwitch", "notify", "成功或失败时通知", {}),
+            ("VSwitch", "notify", "成功或失败时通知（立即运行也通知）", {}),
             ("VCronField", "cron", "执行周期", {"placeholder": self.DEFAULT_CRON}),
         ]
         return [{"component": "VForm", "content": [

@@ -85,6 +85,29 @@ BLUEventClaim = MODULE.BLUEventClaim
 
 
 class BLUEventClaimParserTest(unittest.TestCase):
+    def test_manual_run_notifies_already_claimed_but_scheduled_stays_quiet(self):
+        plugin = BLUEventClaim()
+        plugin._scheduler = None
+        stored = {}
+        plugin.get_data = stored.get
+        plugin.save_data = lambda key, value: stored.update({key: value})
+        plugin.post_message = Mock()
+        plugin.update_config = Mock()
+        days = [{"date": "Oct 27", "status": "已领取", "rewards": ["100 BON"]}]
+        plugin._do_claim = lambda: {"event_title": "秋季活动", "status": "已领取", "message": "已领取",
+                                    "reward": "100 BON", **BLUEventClaim._summarize_days(days)}
+        plugin.init_plugin({"onlyonce": True, "notify": True})
+        job = plugin._scheduler.jobs[0]
+        self.assertEqual(job["kwargs"], {"onlyonce": True})
+        job["func"](**job["kwargs"])
+        self.assertIn("本次执行：已领取", plugin.post_message.call_args.kwargs["text"])
+        plugin.post_message.reset_mock()
+        plugin._claim_reward()
+        plugin.post_message.assert_not_called()
+        plugin._notify = False
+        plugin._claim_reward(onlyonce=True)
+        plugin.post_message.assert_not_called()
+
     def test_claim_notification_uses_current_event_snapshot(self):
         plugin = BLUEventClaim()
         plugin._event_url = "https://blutopia.cc/giveaways/4"
