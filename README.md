@@ -10,6 +10,10 @@ https://github.com/silverfoxonline/MoviePilot-Plugins
 
 ## 插件
 
+### ATH活动奖励自动领取
+
+自动发现 Aither 数字活动，逐项检查每日奖励；支持 Cookie、定时任务、随机延迟、未开放补查、通知和本地活动统计。领取时只提交页面明确提供的本站表单，并核验原日期的领取状态。活动详情页只读取缓存。
+
 ### SP活动奖励自动领取
 
 自动读取 `https://seedpool.org/events`，发现并逐个检查全部活动，无需填写活动编号。

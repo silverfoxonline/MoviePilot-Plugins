@@ -1,4 +1,16 @@
 {
+  "AitherEventClaim": {
+    "name": "ATH活动奖励自动领取",
+    "description": "自动发现 Aither 数字活动，使用站点 Cookie 逐个检查并领取每日奖励。",
+    "labels": "站点,签到,ATH",
+    "version": "1.0.0",
+    "icon": "https://aither.cc/favicon/favicon.svg",
+    "author": "silverfoxonline",
+    "level": 1,
+    "history": {
+      "v1.0.0": "支持活动自动发现、表单领取与核验、按站点日期补查及活动统计通知"
+    }
+  },
   "SeedpoolEventClaim": {
     "name": "SP活动奖励自动领取",
     "description": "自动发现 Seedpool 全部活动，使用手动填写或 MoviePilot 站点 Cookie 分别领取当天奖励并核验结果。",

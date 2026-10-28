@@ -9,7 +9,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 def _module(name, **attributes):
@@ -99,7 +99,8 @@ class BLUEventClaimParserTest(unittest.TestCase):
         plugin.init_plugin({"onlyonce": True, "notify": True})
         job = plugin._scheduler.jobs[0]
         self.assertEqual(job["kwargs"], {"onlyonce": True})
-        job["func"](**job["kwargs"])
+        with patch.object(BLUEventClaim, "_notification_activity_status", return_value="进行中"):
+            job["func"](**job["kwargs"])
         self.assertIn("本次执行：已领取", plugin.post_message.call_args.kwargs["text"])
         plugin.post_message.reset_mock()
         plugin._claim_reward()
