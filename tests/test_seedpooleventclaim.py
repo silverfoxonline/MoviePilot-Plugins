@@ -131,7 +131,7 @@ class SeedpoolEventClaimTest(unittest.TestCase):
             text = self.plugin._notification_text(results)
         self.assertIn("获取到 3 个活动", text)
         self.assertIn("领取内容：3 GiB", text)
-        self.assertIn("已领取/过期/待开放：1/1/1", text)
+        self.assertIn("已领取 1/过期 1/待开放 1", text)
         self.assertIn("⛔ 状态：已截止", text)
         self.assertIn("失败原因：获取失败", text)
         failed = self.plugin._notification_text([{"status": "失败", "message": "Cookie 已失效"}])
@@ -151,7 +151,7 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         self.assertIn("获取到 1 个活动", text)
         self.assertIn("秋季活动", text)
         self.assertIn("领取内容：2 FL Tokens", text)
-        self.assertIn("已领取/过期/待开放：1/0/0", text)
+        self.assertIn("已领取 1/过期 0/待开放 0", text)
 
     def test_real_index_discovers_all_events_including_ended_but_active(self):
         events = Plugin._events(fixture("index"))

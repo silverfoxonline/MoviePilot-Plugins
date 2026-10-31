@@ -162,7 +162,7 @@ class AitherEventClaimTest(unittest.TestCase):
             self.plugin.claim_rewards(onlyonce=True)
         text = self.plugin.post_message.call_args.kwargs["text"]
         self.assertIn("获取到 1 个活动", text)
-        self.assertIn("已领取/过期/待开放：1/1/1", text)
+        self.assertIn("已领取 1/过期 1/待开放 1", text)
         self.assertNotIn("fixture-token", json.dumps(self.data, ensure_ascii=False))
         page = json.dumps(self.plugin.get_page(), ensure_ascii=False)
         self.assertIn("Halloween 2026", page)

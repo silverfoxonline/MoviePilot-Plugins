@@ -3,11 +3,12 @@
     "name": "ATH活动奖励自动领取",
     "description": "自动发现 Aither 数字活动，使用站点 Cookie 逐个检查并领取每日奖励。",
     "labels": "站点,签到,ATH",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://aither.cc/favicon/favicon.svg",
     "author": "silverfoxonline",
     "level": 1,
     "history": {
+      "v1.0.1": "调整通知中的领取、过期和待开放数量显示格式",
       "v1.0.0": "支持活动自动发现、表单领取与核验、按站点日期补查及活动统计通知"
     }
   },
@@ -15,11 +16,12 @@
     "name": "SP活动奖励自动领取",
     "description": "自动发现 Seedpool 全部活动，使用手动填写或 MoviePilot 站点 Cookie 分别领取当天奖励并核验结果。",
     "labels": "站点,签到,SP",
-    "version": "1.0.7",
+    "version": "1.0.8",
     "icon": "signin.png",
     "author": "silverfoxonline",
     "level": 1,
     "history": {
+      "v1.0.8": "调整通知中的领取、过期和待开放数量显示格式",
       "v1.0.7": "手动立即运行时发送活动汇总，定时运行仍仅在成功或失败时通知",
       "v1.0.6": "优化活动领取通知，按活动分段展示状态、奖励和领取统计",
       "v1.0.5": "活动标签增加状态图标：🟢进行中、⛔已过期，悬停提示状态；缓存活动起止日期并兼容旧版每日状态缓存",
@@ -34,11 +36,12 @@
     "name": "BLU活动奖励自动领取",
     "description": "使用手动填写或MoviePilot站点配置中的BLU Cookie，通过网页接口自动领取当天Event奖励。",
     "labels": "站点,签到,BLU",
-    "version": "1.0.7",
+    "version": "1.0.8",
     "icon": "https://blutopia.cc/favicon.svg",
     "author": "silverfoxonline",
     "level": 1,
     "history": {
+      "v1.0.8": "调整通知中的领取、过期和待开放数量显示格式",
       "v1.0.7": "手动立即运行时发送活动汇总，定时运行仍仅在成功或失败时通知",
       "v1.0.6": "优化活动领取通知，展示活动状态、本次奖励和领取统计",
       "v1.0.5": "增加未开放补查间隔与当日最多补查次数配置；Cron 下方实时显示 MP2 与 BLU 的时区换算",

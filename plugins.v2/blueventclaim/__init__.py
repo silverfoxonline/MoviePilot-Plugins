@@ -27,7 +27,7 @@ class BLUEventClaim(_PluginBase):
     plugin_name = "BLU活动奖励自动领取"
     plugin_desc = "通过 BLU 网页接口自动领取当天 Event 奖励"
     plugin_icon = "https://blutopia.cc/favicon.svg"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "blueventclaim_"
@@ -235,7 +235,7 @@ class BLUEventClaim(_PluginBase):
             lines.append(f"✨ 本次执行：{record.get('status') or '未知'}")
             lines.append(f"🎁 领取内容：{record.get('reward') or '—'}")
             if days:
-                lines.append(f"📊 已领取/过期/待开放：{snapshot['claimed_days']}/{snapshot['expired_days']}/{snapshot['future_days']}")
+                lines.append(f"📊 已领取 {snapshot['claimed_days']}/过期 {snapshot['expired_days']}/待开放 {snapshot['future_days']}")
             else:
                 lines.append("📊 已领取/过期/待开放：暂无数据")
         if record.get("status") == "失败":

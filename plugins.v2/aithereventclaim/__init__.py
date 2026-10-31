@@ -25,7 +25,7 @@ class AitherEventClaim(_PluginBase):
     plugin_name = "ATH活动奖励自动领取"
     plugin_desc = "自动发现 Aither 全部活动，逐个领取当天奖励"
     plugin_icon = "https://aither.cc/favicon/favicon.svg"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "aithereventclaim_"
@@ -575,7 +575,7 @@ class AitherEventClaim(_PluginBase):
                 if days:
                     counts = [sum(day.get("status") == status for day in days)
                               for status in ("已领取", "已过期未领", "待开放")]
-                    lines.append(f"📊 已领取/过期/待开放：{counts[0]}/{counts[1]}/{counts[2]}")
+                    lines.append(f"📊 已领取 {counts[0]}/过期 {counts[1]}/待开放 {counts[2]}")
                 else:
                     lines.append("📊 已领取/过期/待开放：暂无数据")
             if event.get("status") == "失败":
