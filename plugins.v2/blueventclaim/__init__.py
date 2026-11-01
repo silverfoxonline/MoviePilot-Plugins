@@ -27,7 +27,7 @@ class BLUEventClaim(_PluginBase):
     plugin_name = "BLU活动奖励自动领取"
     plugin_desc = "通过 BLU 网页接口自动领取当天 Event 奖励"
     plugin_icon = "https://blutopia.cc/favicon.svg"
-    plugin_version = "1.0.8"
+    plugin_version = "1.0.9"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "blueventclaim_"
@@ -97,7 +97,7 @@ class BLUEventClaim(_PluginBase):
 
     def get_service(self) -> List[Dict[str, Any]]:
         """注册每日领取任务。"""
-        if not self._enabled or not self._cron:
+        if not self._enabled or not self._cron or self._event_finished():
             return []
         try:
             trigger = CronTrigger.from_crontab(self._cron)
@@ -137,6 +137,14 @@ class BLUEventClaim(_PluginBase):
 
     def _claim_reward(self, retry_count: int = 0, expected_date: str = "", onlyonce: bool = False):
         """串行执行一次领取，并保存可审计的结果。"""
+        if self._event_finished():
+            logger.info("[BLUEventClaim] 当前活动已结束，跳过领取")
+            if onlyonce and self._notify:
+                url = self._normalized_event_url(self._event_url)
+                snapshot = (self.get_data("event_snapshots") or {}).get(url) or {}
+                self.post_message(mtype=NotificationType.SiteMessage, title="【🎁 BLU活动奖励】",
+                                  text=self._notification_text({"status": "已结束"}, snapshot))
+            return
         now = datetime.datetime.now(pytz.timezone(settings.TZ))
         if expected_date and now.date().isoformat() != expected_date:
             logger.info("[BLUEventClaim] 重试已跨日，跳过过期任务")
@@ -207,6 +215,12 @@ class BLUEventClaim(_PluginBase):
                 snapshots = dict(list(snapshots.items())[-self.MAX_EVENT_SNAPSHOTS:])
             self.save_data("event_snapshots", snapshots)
 
+        if (record["status"] == "已结束" and
+                self._normalized_event_url(record["event_url"]) == self._normalized_event_url(self._event_url)):
+            self.save_data("ended_event", {"event_url": self._normalized_event_url(record["event_url"]),
+                                           "time": record["time"]})
+            self._remove_finished_schedule()
+
         history = self.get_data("claim_logs") or []
         self.save_data("claim_logs", (history + [record])[-self.MAX_HISTORY:])
 
@@ -216,7 +230,7 @@ class BLUEventClaim(_PluginBase):
         else:
             logger.info(log_message)
 
-        if self._notify and (onlyonce or record["status"] in ("成功", "失败")):
+        if self._notify and (onlyonce or record["status"] in ("成功", "失败", "已结束")):
             self.post_message(
                 mtype=NotificationType.SiteMessage,
                 title="【🎁 BLU活动奖励】",
@@ -229,9 +243,11 @@ class BLUEventClaim(_PluginBase):
         lines = ["📋 获取到 1 个活动" if days else "📋 活动数据未获取",
                  "━━━━━━━━━━━━━━",
                  f"🎉 {snapshot.get('event_title') or 'BLU Event'}"]
-        status = cls._notification_activity_status(snapshot)
-        lines.append(f"{'🟢' if status == '进行中' else '⛔' if status == '已截止' else '❔'} 状态：{status}")
-        if status != "已截止":
+        status = "已结束" if record.get("status") == "已结束" else cls._notification_activity_status(snapshot)
+        lines.append(f"{'🟢' if status == '进行中' else '⛔' if status in ('已截止', '已结束') else '❔'} 状态：{status}")
+        if status == "已结束":
+            lines.append("🛑 每日自动领取已停止")
+        elif status != "已截止":
             lines.append(f"✨ 本次执行：{record.get('status') or '未知'}")
             lines.append(f"🎁 领取内容：{record.get('reward') or '—'}")
             if days:
@@ -259,7 +275,38 @@ class BLUEventClaim(_PluginBase):
         today = today or datetime.datetime.now(pytz.timezone("UTC")).date()
         return "尚未开始" if today < start else "已截止" if today > last else "进行中"
 
-    def _do_claim(self, today: Optional[datetime.date] = None) -> Dict[str, Any]:
+    def _event_finished(self) -> bool:
+        """结束标记只约束对应活动；更换活动地址即可恢复定时任务。"""
+        ended = self.get_data("ended_event") or {}
+        current = self._normalized_event_url(self._event_url)
+        return bool(current and ended.get("event_url") == current)
+
+    @staticmethod
+    def _remove_finished_schedule():
+        """尽快移除已注册的每日任务；失败时结束标记仍阻止后续访问。"""
+        try:
+            from app.scheduler import Scheduler
+            Scheduler().remove_plugin_job("BLUEventClaim")
+        except Exception as err:
+            logger.warning(f"[BLUEventClaim] 移除已结束活动任务失败：{type(err).__name__}")
+
+    def _missing_event_result(self, page, event_url: str, snapshot: dict,
+                              site_today: datetime.date) -> Optional[Dict[str, Any]]:
+        """只有同一活动的 404/410 和已过最后一天的缓存同时存在，才认定页面已结束。"""
+        if (page is None or page.status_code not in (404, 410) or not snapshot or
+                self._normalized_event_url(page.url or "") != event_url or self._is_login_page(page) or
+                re.search(r"cf-chl-|challenges\.cloudflare\.com|just a moment|checking your browser", page.text or "", re.I)):
+            return None
+        days = snapshot.get("days") or []
+        if not (days and all(day.get("status") in ("已领取", "已过期未领") for day in days) and
+                self._notification_activity_status(snapshot, site_today) == "已截止"):
+            return None
+        return {"event_url": event_url, "event_title": snapshot.get("event_title") or "BLU Event",
+                "status": "已结束", "message": "活动页面已不存在，缓存显示活动已截止，已停止每日自动领取",
+                **self._summarize_days(days)}
+
+    def _do_claim(self, today: Optional[datetime.date] = None,
+                  site_today: Optional[datetime.date] = None) -> Dict[str, Any]:
         """读取活动页并在需要时提交一次领取请求。"""
         event_url = self._normalized_event_url(self._event_url)
         if not event_url:
@@ -286,8 +333,32 @@ class BLUEventClaim(_PluginBase):
 
         page = request.get_res(url=event_url)
         error = self._response_error(page, "读取活动页")
+        site_today = site_today or datetime.datetime.now(pytz.timezone("UTC")).date()
+        confirmation_only = False
         if error:
-            return error
+            snapshot = None
+            if (page is not None and page.status_code in (404, 410)) or (not proxies and settings.PROXY):
+                snapshot = (self.get_data("event_snapshots") or {}).get(event_url)
+            missing = self._missing_event_result(page, event_url, snapshot, site_today)
+            if missing:
+                return missing
+            # 只有旧缓存显示可能已结束时，才用 MP 已配置的代理复核一次。
+            # 复核页面只用于判断结束，绝不借此自动提交领取。
+            days = (snapshot or {}).get("days") or []
+            if not (not proxies and settings.PROXY and days and all(day.get("status") in ("已领取", "已过期未领") for day in days) and
+                    self._notification_activity_status(snapshot, site_today) == "已截止"):
+                return error
+            verify_request = RequestUtils(
+                ua=user_agent, cookies=cookie, proxies=settings.PROXY, session=requests.Session(),
+                timeout=self.REQUEST_TIMEOUT, referer=event_url, accept_type="text/html,application/xhtml+xml",
+            )
+            page = verify_request.get_res(url=event_url)
+            missing = self._missing_event_result(page, event_url, snapshot, site_today)
+            if missing:
+                return missing
+            if self._response_error(page, "代理复核活动页") or self._is_login_page(page):
+                return error
+            confirmation_only = True
         if self._is_login_page(page):
             return {"status": "失败", "message": "BLU Cookie 已失效，请先在站点设置中更新"}
 
@@ -298,6 +369,15 @@ class BLUEventClaim(_PluginBase):
             (day for day in progress["days"] if day["status"] == "今日待领取"), None
         )
         target_day = claimable_day or today_day
+        # BLU 会将历史已领取卡片也标记为 today-claimed，不能仅凭该类名判断当天。
+        # 沿用插件原有的 UTC 日期约定；所有卡片均为已领或过期且末日已过时确认结束。
+        days = progress["days"]
+        if (days and not claimable_day and
+                all(day["status"] in ("已领取", "已过期未领") for day in days) and
+                self._notification_activity_status({"days": days, "updated_at": site_today.isoformat()}, site_today) == "已截止"):
+            return {"event_url": event_url, "status": "已结束", "message": "活动已结束，已停止每日自动领取", **progress}
+        if confirmation_only:
+            return error
         # BLU 标记的可领卡片优先于 MP2 本地日期，避免时区跨日漏领。
         if not claimable_day and today_day and today_day["status"] == "已领取":
             reward = " / ".join(today_day.get("rewards") or [])

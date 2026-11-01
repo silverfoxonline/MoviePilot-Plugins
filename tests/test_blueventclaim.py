@@ -278,6 +278,7 @@ class BLUEventClaimParserTest(unittest.TestCase):
 
     def test_cron_random_delay_uses_apscheduler_jitter(self):
         plugin = BLUEventClaim()
+        plugin.get_data = lambda key: None
         plugin._enabled = True
         plugin._cron = "5 9 * * *"
         plugin._random_delay = 30
@@ -290,6 +291,178 @@ class BLUEventClaimParserTest(unittest.TestCase):
         self.assertEqual(plugin._random_delay, 60)
         plugin.init_plugin({"random_delay": -1})
         self.assertEqual(plugin._random_delay, 0)
+
+    def test_finished_event_does_not_submit_claim(self):
+        page = '''<h2 class="panel__heading">Halloween</h2>
+        <article class="events__prize"><h3>Oct 30</h3><i class="events__prize-icon--past"></i><i class="events__prize-message">Expired</i></article>
+        <article class="events__prize"><h3>Oct 31</h3><i class="events__prize-icon--today-claimed"></i><i class="events__prize-message">100 BON</i></article>'''
+        request = Mock()
+        request.get_res.return_value = types.SimpleNamespace(status_code=200, url="https://blutopia.cc/giveaways/4", text=page)
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=0)
+        with patch.object(MODULE, "SiteOper", return_value=types.SimpleNamespace(get_by_domain=lambda _: site)), patch.object(MODULE, "RequestUtils", return_value=request):
+            result = BLUEventClaim()._do_claim(today=datetime.date(2026, 11, 1), site_today=datetime.date(2026, 11, 1))
+        self.assertEqual(result["status"], "已结束")
+        self.assertEqual(result["event_title"], "Halloween")
+        request.post_res.assert_not_called()
+
+    def test_finished_event_notifies_once_stops_cron_and_resumes_for_new_url(self):
+        plugin = BLUEventClaim()
+        plugin._enabled, plugin._notify, plugin._cron = True, True, "5 9 * * *"
+        plugin._event_url = "https://blutopia.cc/giveaways/4"
+        stored = {}
+        plugin.get_data = stored.get
+        plugin.save_data = lambda key, value: stored.update({key: value})
+        plugin.post_message = Mock()
+        plugin._do_claim = Mock(return_value={"event_url": plugin._event_url, "event_title": "Halloween",
+            "status": "已结束", "message": "活动已结束", "days": [
+                {"date": "Oct 31", "status": "已过期未领", "rewards": []}]})
+        plugin._remove_finished_schedule = Mock()
+        plugin._claim_reward()
+        self.assertEqual(stored["ended_event"]["event_url"], "https://blutopia.cc/giveaways/4")
+        self.assertEqual(stored["claim_logs"][-1]["status"], "已结束")
+        self.assertIn("状态：已结束", plugin.post_message.call_args.kwargs["text"])
+        self.assertIn("每日自动领取已停止", plugin.post_message.call_args.kwargs["text"])
+        plugin._remove_finished_schedule.assert_called_once()
+        self.assertEqual(plugin.get_service(), [])
+        plugin._claim_reward()
+        plugin._do_claim.assert_called_once()
+        plugin.post_message.assert_called_once()
+        plugin._claim_reward(onlyonce=True)
+        self.assertEqual(plugin.post_message.call_count, 2)
+        plugin._do_claim.assert_called_once()
+        plugin._event_url = "https://blutopia.cc/giveaways/5"
+        self.assertEqual(len(plugin.get_service()), 1)
+
+    def test_last_utc_day_and_unknown_cards_do_not_end_event(self):
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=0)
+        for icon in ("events__prize-icon--today-claimed", "unrecognized"):
+            page = f'<article class="events__prize"><h3>Oct 31</h3><i class="{icon}"></i></article>'
+            request = Mock()
+            request.get_res.return_value = types.SimpleNamespace(status_code=200, url="https://blutopia.cc/giveaways/4", text=page)
+            with patch.object(MODULE, "SiteOper", return_value=types.SimpleNamespace(get_by_domain=lambda _: site)), patch.object(MODULE, "RequestUtils", return_value=request):
+                result = BLUEventClaim()._do_claim(today=datetime.date(2026, 11, 1), site_today=datetime.date(2026, 10, 31))
+            self.assertNotEqual(result["status"], "已结束")
+            request.post_res.assert_not_called()
+
+    def test_cached_expiry_uses_configured_proxy_only_to_confirm(self):
+        url = "https://blutopia.cc/giveaways/4"
+        cached = {"updated_at": "2026-10-31 09:21:05", "days": [
+            {"date": "Oct 30", "status": "已领取"}, {"date": "Oct 31", "status": "已领取"}]}
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=0)
+        direct, proxy = Mock(), Mock()
+        direct.get_res.return_value = None
+        proxy.get_res.return_value = types.SimpleNamespace(status_code=200, url=url, text='''
+            <article class="events__prize"><h3>Oct 30</h3><i class="events__prize-icon--today-claimed"></i></article>
+            <article class="events__prize"><h3>Oct 31</h3><i class="events__prize-icon--today-claimed"></i></article>''')
+        plugin = BLUEventClaim()
+        plugin.get_data = lambda key: {url: cached} if key == "event_snapshots" else None
+        with patch.object(MODULE, "SiteOper", return_value=types.SimpleNamespace(get_by_domain=lambda _: site)), \
+                patch.object(MODULE, "RequestUtils", side_effect=[direct, proxy]) as factory, \
+                patch.object(MODULE.settings, "PROXY", {"https": "http://proxy.test"}):
+            result = plugin._do_claim(today=datetime.date(2026, 11, 1), site_today=datetime.date(2026, 11, 1))
+        self.assertEqual(result["status"], "已结束")
+        self.assertEqual(factory.call_args_list[1].kwargs["proxies"], {"https": "http://proxy.test"})
+        proxy.post_res.assert_not_called()
+
+    def test_proxy_confirmation_never_claims_new_activity_or_stops_on_failure(self):
+        url = "https://blutopia.cc/giveaways/4"
+        cached = {"updated_at": "2026-10-31", "days": [{"date": "Oct 31", "status": "已领取"}]}
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=0)
+        for page in (None, '<article class="events__prize"><h3>Nov 1</h3><i class="events__prize-icon--today-unclaimed"></i></article>'):
+            direct, proxy = Mock(), Mock()
+            direct.get_res.return_value = None
+            proxy.get_res.return_value = None if page is None else types.SimpleNamespace(status_code=200, url=url, text=page)
+            plugin = BLUEventClaim()
+            plugin.get_data = lambda key: {url: cached} if key == "event_snapshots" else None
+            with patch.object(MODULE, "SiteOper", return_value=types.SimpleNamespace(get_by_domain=lambda _: site)), \
+                    patch.object(MODULE, "RequestUtils", side_effect=[direct, proxy]), \
+                    patch.object(MODULE.settings, "PROXY", {"https": "http://proxy.test"}):
+                result = plugin._do_claim(today=datetime.date(2026, 11, 1), site_today=datetime.date(2026, 11, 1))
+            self.assertEqual(result["status"], "失败")
+            proxy.post_res.assert_not_called()
+
+    def test_missing_event_page_requires_elapsed_cached_event(self):
+        url = "https://blutopia.cc/giveaways/4"
+        cached = {"event_title": "Halloween", "updated_at": "2026-10-31 09:21:05", "days": [
+            {"date": "Oct 30", "status": "已过期未领", "rewards": []},
+            {"date": "Oct 31", "status": "已领取", "rewards": ["100 BON"]}]}
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=0)
+        cases = [(404, cached, datetime.date(2026, 11, 1), "<h1>Not found</h1>", "已结束"),
+                 (410, cached, datetime.date(2026, 11, 1), "<h1>Gone</h1>", "已结束"),
+                 (404, cached, datetime.date(2026, 10, 31), "<h1>Not found</h1>", "失败"),
+                 (404, {}, datetime.date(2026, 11, 1), "<h1>Not found</h1>", "失败"),
+                 (403, cached, datetime.date(2026, 11, 1), "<h1>Forbidden</h1>", "失败"),
+                 (429, cached, datetime.date(2026, 11, 1), "<h1>Rate limited</h1>", "失败"),
+                 (500, cached, datetime.date(2026, 11, 1), "<h1>Server error</h1>", "失败"),
+                 (404, cached, datetime.date(2026, 11, 1), "<title>Just a moment...</title>", "失败")]
+        for code, snapshot, site_today, body, expected in cases:
+            with self.subTest(code=code, expected=expected, body=body):
+                request = Mock()
+                request.get_res.return_value = types.SimpleNamespace(status_code=code, url=url, text=body)
+                plugin = BLUEventClaim()
+                plugin.get_data = lambda key: {url: snapshot} if key == "event_snapshots" else None
+                with patch.object(MODULE, "SiteOper", return_value=types.SimpleNamespace(get_by_domain=lambda _: site)), \
+                        patch.object(MODULE, "RequestUtils", return_value=request), patch.object(MODULE.settings, "PROXY", None):
+                    result = plugin._do_claim(today=site_today, site_today=site_today)
+                self.assertEqual(result["status"], expected)
+                if expected == "已结束":
+                    self.assertEqual(result["event_title"], "Halloween")
+                    self.assertEqual(result["claimed_days"], 1)
+                request.post_res.assert_not_called()
+
+    def test_proxy_confirmation_handles_missing_page(self):
+        url = "https://blutopia.cc/giveaways/4"
+        cached = {"event_title": "Halloween", "updated_at": "2026-10-31", "days": [
+            {"date": "Oct 31", "status": "已领取", "rewards": ["100 BON"]}]}
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=0)
+        direct, proxy = Mock(), Mock()
+        direct.get_res.return_value = None
+        proxy.get_res.return_value = types.SimpleNamespace(status_code=404, url=url, text="Not found")
+        plugin = BLUEventClaim()
+        plugin.get_data = lambda key: {url: cached} if key == "event_snapshots" else None
+        with patch.object(MODULE, "SiteOper", return_value=types.SimpleNamespace(get_by_domain=lambda _: site)), \
+                patch.object(MODULE, "RequestUtils", side_effect=[direct, proxy]), \
+                patch.object(MODULE.settings, "PROXY", {"https": "http://proxy.test"}):
+            result = plugin._do_claim(today=datetime.date(2026, 11, 1), site_today=datetime.date(2026, 11, 1))
+        self.assertEqual(result["status"], "已结束")
+        proxy.post_res.assert_not_called()
+
+    def test_cross_year_event_ends_only_after_last_utc_day(self):
+        page = '''<article class="events__prize"><h3>Dec 31</h3><i class="events__prize-icon--past"></i></article>
+        <article class="events__prize"><h3>Jan 1</h3><i class="events__prize-icon--past"></i></article>'''
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=0)
+        request = Mock()
+        request.get_res.return_value = types.SimpleNamespace(status_code=200, url="https://blutopia.cc/giveaways/4", text=page)
+        with patch.object(MODULE, "SiteOper", return_value=types.SimpleNamespace(get_by_domain=lambda _: site)), patch.object(MODULE, "RequestUtils", return_value=request):
+            plugin = BLUEventClaim()
+            last_day = datetime.date(2027, 1, 1)
+            self.assertNotEqual(plugin._do_claim(today=last_day, site_today=last_day)["status"], "已结束")
+            next_day = datetime.date(2027, 1, 2)
+            self.assertEqual(plugin._do_claim(today=next_day, site_today=next_day)["status"], "已结束")
+
+    def test_old_activity_finishing_does_not_stop_a_new_address(self):
+        plugin = BLUEventClaim()
+        plugin._event_url = "https://blutopia.cc/giveaways/4"
+        plugin._notify = False
+        stored = {}
+        plugin.get_data = stored.get
+        plugin.save_data = lambda key, value: stored.update({key: value})
+        plugin._remove_finished_schedule = Mock()
+        def finish_old_event():
+            plugin._event_url = "https://blutopia.cc/giveaways/5"
+            return {"event_url": "https://blutopia.cc/giveaways/4", "status": "已结束", "message": "已结束", "days": []}
+        plugin._do_claim = finish_old_event
+        plugin._claim_reward()
+        self.assertNotIn("ended_event", stored)
+        plugin._remove_finished_schedule.assert_not_called()
+
+    def test_finished_schedule_removes_only_blu_plugin_jobs(self):
+        scheduler = Mock()
+        app_scheduler = types.ModuleType("app.scheduler")
+        app_scheduler.Scheduler = lambda: scheduler
+        with patch.dict(sys.modules, {"app.scheduler": app_scheduler}):
+            BLUEventClaim._remove_finished_schedule()
+        scheduler.remove_plugin_job.assert_called_once_with("BLUEventClaim")
 
     def test_retry_settings_are_configurable_and_bounded(self):
         plugin = BLUEventClaim()

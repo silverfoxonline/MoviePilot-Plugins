@@ -56,6 +56,74 @@ class AitherEventClaimTest(unittest.TestCase):
         self.plugin.update_config = Mock(side_effect=lambda config: self.config.update(config))
         self.plugin.post_message = Mock()
 
+    def test_finished_uses_site_date_and_not_mp_date(self):
+        page = DETAIL.replace("events__prize-icon--future", "events__prize-icon--past")
+        for date, expected in (("2026-10-30", "已结束"), ("2026-10-29", "无可领奖励"), ("", "无可领奖励")):
+            session = Mock(); session.request.return_value = response(page.replace("2026-10-28 01:38:38", date))
+            with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 11, 2)):
+                result = self.plugin._claim_event(session, {"event_url": URL})
+            self.assertEqual(result["status"], expected)
+            self.assertEqual(session.request.call_count, 1)
+
+    def test_ending_notification_is_sent_once_and_does_not_disable_plugin(self):
+        result = {"event_url": URL, "event_title": "Halloween 2026", "status": "已结束", "message": "已结束",
+                  "site_date": "2026-11-01", "days": [{"date": "Oct 31", "status": "已领取", "rewards": []}],
+                  "total_days": 1, "claimed_days": 1}
+        self.plugin._enabled = True
+        with patch.object(self.plugin, "_run", return_value=[result]):
+            self.plugin.claim_rewards()
+            self.assertIn("状态：已结束", self.plugin.post_message.call_args.kwargs["text"])
+            self.assertIn(URL, self.data["ended_events"])
+            self.plugin.post_message.reset_mock()
+            self.plugin.claim_rewards()
+            self.plugin.post_message.assert_not_called()
+        self.assertTrue(self.plugin._enabled)
+
+    def test_finished_activity_is_skipped_and_new_activity_is_checked(self):
+        self.data["ended_events"] = {URL: {"event_title": "Halloween 2026"}}
+        new_url = "https://aither.cc/events/6"
+        index = INDEX.replace("</section>", '<a href="/events/6">新活动</a></section>') + '<footer><strong>Date:</strong><span>2026-11-01</span></footer>'
+        session = Mock(); context = Mock(__enter__=Mock(return_value=session), __exit__=Mock(return_value=False))
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=False)
+        with patch.object(MODULE.requests, "Session", return_value=context), patch.object(MODULE, "SiteOper") as oper:
+            oper.return_value.get_by_domain.return_value = site
+            with patch.object(self.plugin, "_request", return_value=response(index, Plugin.EVENTS_URL)), \
+                    patch.object(self.plugin, "_claim_event", return_value={"status": "成功"}) as claim:
+                results = self.plugin._run()
+        self.assertEqual([item["status"] for item in results], ["已结束", "成功"])
+        self.assertEqual(claim.call_count, 1)
+        self.assertEqual(claim.call_args.args[1]["event_url"], new_url)
+
+    def test_disappeared_activity_requires_current_site_date_and_terminal_days(self):
+        self.data["event_snapshots"] = {URL: {"event_url": URL, "event_title": "Halloween 2026", "time": "2026-10-31",
+            "days": [{"date": "Oct 31", "status": "已领取", "rewards": []}], "total_days": 1, "claimed_days": 1}}
+        index = '<main class="page__event--index"><section></section></main>'
+        session = Mock(); context = Mock(__enter__=Mock(return_value=session), __exit__=Mock(return_value=False))
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=False)
+        with patch.object(MODULE.requests, "Session", return_value=context), patch.object(MODULE, "SiteOper") as oper:
+            oper.return_value.get_by_domain.return_value = site
+            with patch.object(self.plugin, "_request", return_value=response(index + '<footer><strong>Date:</strong><span>2026-11-01</span></footer>', Plugin.EVENTS_URL)):
+                self.assertEqual(self.plugin._run()[0]["status"], "已结束")
+                self.assertEqual(self.plugin._run("2026-10-31"), [])
+            with patch.object(self.plugin, "_request", return_value=response(index, Plugin.EVENTS_URL)):
+                self.assertEqual(self.plugin._run(), [])
+
+    def test_disappeared_detail_with_cached_days_distinguishes_http_errors(self):
+        self.data["event_snapshots"] = {URL: {"event_url": URL, "event_title": "Halloween 2026", "time": "2026-10-31",
+            "days": [{"date": "Oct 31", "status": "已领取", "rewards": []}], "total_days": 1, "claimed_days": 1}}
+        index = INDEX + '<footer><strong>Date:</strong><span>2026-11-01</span></footer>'
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=False)
+        for code, body, expected in ((404, "Not found", "已结束"), (410, "Gone", "已结束"),
+                                      (403, "Forbidden", "失败"), (404, "Just a moment", "失败"), (500, "Error", "失败")):
+            with self.subTest(code=code, body=body):
+                session = Mock(); context = Mock(__enter__=Mock(return_value=session), __exit__=Mock(return_value=False))
+                session.request.side_effect = [response(index, Plugin.EVENTS_URL), response(body, URL, code)]
+                with patch.object(MODULE.requests, "Session", return_value=context), patch.object(MODULE, "SiteOper") as oper:
+                    oper.return_value.get_by_domain.return_value = site
+                    result = self.plugin._run()[0]
+                self.assertEqual(result["status"], expected)
+                self.assertEqual([call.args[0] for call in session.request.call_args_list], ["GET", "GET"])
+
     def test_numeric_event_discovery_and_bad_index(self):
         self.assertEqual(Plugin._events(INDEX), [{"event_url": URL, "event_title": "Halloween 2026"}])
         multiple = INDEX.replace("</section>", '<a href="/events/6">第二个活动</a><a href="/events/5">重复</a></section>')

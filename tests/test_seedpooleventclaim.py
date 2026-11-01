@@ -98,6 +98,84 @@ class SeedpoolEventClaimTest(unittest.TestCase):
         self.plugin.update_config = Mock(side_effect=lambda config: self.config.update(config) or True)
         self.plugin.post_message = Mock()
 
+    def test_finished_event_uses_site_date_and_last_reward_card(self):
+        url = Plugin.BASE_URL + "/events/7"
+        ended_page = claimed_page("7").replace("events__prize-icon--future", "events__prize-icon--past")
+        for date, expected in (("2026-11-03", "已结束"), ("2026-11-02", "无可领奖励"), ("", "无可领奖励")):
+            page = ended_page + f'<footer><strong>Date:</strong><span>{date}</span></footer>'
+            session = Mock(); session.request.return_value = response(page, url)
+            with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 11, 3)):
+                result = self.plugin._claim_event(session, {"event_url": url, "ends_at": "2026-12-31"})
+            self.assertEqual(result["status"], expected)
+            self.assertEqual(session.request.call_count, 1)
+        self.assertEqual(self.plugin._activity_status({"status": "已结束", "ends_at": "2026-12-31"}), ("⛔", "已过期"))
+
+    def test_ending_notification_is_sent_once_for_each_event(self):
+        url = Plugin.BASE_URL + "/events/7"
+        result = {"event_url": url, "event_title": "Spooktober2026", "status": "已结束", "message": "已结束",
+                  "site_date": "2026-11-03", "days": [{"date": "Nov 2", "status": "已领取", "rewards": []}],
+                  "total_days": 1, "claimed_days": 1}
+        with patch.object(self.plugin, "_run", return_value=[result]):
+            self.plugin.claim_rewards()
+            self.assertIn("状态：已结束", self.plugin.post_message.call_args.kwargs["text"])
+            self.assertIn(url, self.data["ended_events"])
+            self.plugin.post_message.reset_mock()
+            self.plugin.claim_rewards()
+            self.plugin.post_message.assert_not_called()
+
+    def test_reactivated_event_clears_ended_marker(self):
+        url = Plugin.BASE_URL + "/events/7"
+        self.data["ended_events"] = {url: {"ends_at": "2026-11-02"}}
+        active = {"event_url": url, "event_title": "New event", "ends_at": "2026-12-31",
+                  "status": "无可领奖励", "message": "尚无奖励"}
+        with patch.object(self.plugin, "_run", return_value=[active]):
+            self.plugin.claim_rewards()
+        self.assertNotIn(url, self.data["ended_events"])
+
+    def test_finished_event_is_skipped_but_other_events_are_checked(self):
+        old = Plugin.BASE_URL + "/events/7"
+        self.data["ended_events"] = {old: {"ends_at": "2026-11-02 00:00:00"}}
+        session = Mock(); context = Mock(__enter__=Mock(return_value=session), __exit__=Mock(return_value=False))
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=False)
+        listing = fixture("index") + '<footer><strong>Date:</strong><span>2026-11-03 01:00:00</span></footer>'
+        with patch.object(PLUGIN_MODULE.requests, "Session", return_value=context), patch.object(PLUGIN_MODULE, "SiteOper") as oper:
+            oper.return_value.get_by_domain.return_value = site
+            with patch.object(self.plugin, "_request", return_value=response(listing)), \
+                    patch.object(self.plugin, "_claim_event", return_value={"status": "成功"}) as claim:
+                results = self.plugin._run()
+        self.assertEqual([item["status"] for item in results], ["成功", "已结束", "成功"])
+        self.assertEqual(claim.call_count, 2)
+        self.assertNotIn(old, [call.args[1]["event_url"] for call in claim.call_args_list])
+
+    def test_missing_activity_from_list_can_end_only_with_current_site_date(self):
+        old = Plugin.BASE_URL + "/events/8"
+        self.data["event_snapshots"] = {old: {"event_url": old, "event_title": "Old event", "time": "2026-10-16",
+            "days": [{"date": "Oct 16", "status": "已过期未领", "rewards": []}], "total_days": 1, "claimed_days": 0}}
+        session = Mock(); context = Mock(__enter__=Mock(return_value=session), __exit__=Mock(return_value=False))
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=False)
+        index = '<main class="page__event--index"><table></table></main>'
+        with patch.object(PLUGIN_MODULE.requests, "Session", return_value=context), patch.object(PLUGIN_MODULE, "SiteOper") as oper:
+            oper.return_value.get_by_domain.return_value = site
+            with patch.object(self.plugin, "_request", return_value=response(index + '<footer><strong>Date:</strong><span>2026-11-01</span></footer>')):
+                self.assertEqual(self.plugin._run()[0]["status"], "已结束")
+            with patch.object(self.plugin, "_request", return_value=response(index)):
+                self.assertEqual(self.plugin._run(), [])
+
+    def test_missing_detail_requires_matching_404_or_410(self):
+        url = Plugin.BASE_URL + "/events/7"
+        self.data["event_snapshots"] = {url: {"event_url": url, "event_title": "Old event", "time": "2026-10-16",
+            "days": [{"date": "Oct 16", "status": "已过期未领", "rewards": []}], "total_days": 1, "claimed_days": 0}}
+        session = Mock(); context = Mock(__enter__=Mock(return_value=session), __exit__=Mock(return_value=False))
+        site = types.SimpleNamespace(cookie="session=fixture", ua="test", proxy=False)
+        index = '<main class="page__event--index"><table><tr><td><a href="/events/7">Old event</a></td></tr></table></main><footer><strong>Date:</strong><span>2026-11-01</span></footer>'
+        with patch.object(PLUGIN_MODULE.requests, "Session", return_value=context), patch.object(PLUGIN_MODULE, "SiteOper") as oper:
+            oper.return_value.get_by_domain.return_value = site
+            for code, expected in ((404, "已结束"), (410, "已结束"), (403, "失败"), (500, "失败")):
+                with self.subTest(code=code):
+                    error = ValueError("HTTP failure"); error.status_code=code; error.response_url=url; error.is_challenge=False
+                    with patch.object(self.plugin, "_request", return_value=response(index)), patch.object(self.plugin, "_claim_event", side_effect=error):
+                        self.assertEqual(self.plugin._run()[0]["status"], expected)
+
     def test_manual_run_notifies_no_reward_but_scheduled_stays_quiet(self):
         result = {"event_url": "https://seedpool.org/events/7", "event_title": "秋季活动",
                   "starts_at": "2026-10-01", "ends_at": "2026-10-31", "status": "无可领奖励",
@@ -385,7 +463,8 @@ class SeedpoolEventClaimTest(unittest.TestCase):
             {"event_url": url, "event_title": "Spooktober2026", "time": "2026-10-25 09:00:00", "status": "失败", "message": "HTTP 403"},
             {"event_url": Plugin.BASE_URL + "/events/6", "event_title": "Dailies2", "status": "失败", "message": "HTTP 419"},
         ]
-        content = json.dumps(self.plugin.get_page(), ensure_ascii=False)
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 25)):
+            content = json.dumps(self.plugin.get_page(), ensure_ascii=False)
         self.assertIn("HTTP 403", content)
         self.assertIn("HTTP 419", content)
         self.assertIn("2026-10-24 09:00:00", content)

@@ -25,7 +25,7 @@ class AitherEventClaim(_PluginBase):
     plugin_name = "ATH活动奖励自动领取"
     plugin_desc = "自动发现 Aither 全部活动，逐个领取当天奖励"
     plugin_icon = "https://aither.cc/favicon/favicon.svg"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "aithereventclaim_"
@@ -146,6 +146,14 @@ class AitherEventClaim(_PluginBase):
         return f"contains(concat(' ', normalize-space(@class), ' '), ' {name} ')"
 
     @classmethod
+    def _site_date(cls, page: str) -> str:
+        values = cls._tree(page).xpath("//footer//strong[normalize-space()='Date:']/following-sibling::span[1]/text()")
+        try:
+            return datetime.date.fromisoformat(values[0].strip()[:10]).isoformat() if values else ""
+        except ValueError:
+            return ""
+
+    @classmethod
     def _events(cls, page: str) -> List[dict]:
         root = cls._tree(page)
         mains = root.xpath(f"//main[{cls._has_class('page__event--index')}]")
@@ -206,13 +214,7 @@ class AitherEventClaim(_PluginBase):
                         claim = {"url": action, "data": data, "date": date}
         if not days:
             raise ValueError("活动详情没有奖励卡片，无法判断领取状态")
-        site_dates = root.xpath("//footer//strong[normalize-space()='Date:']/following-sibling::span[1]/text()")
-        site_date = ""
-        if site_dates:
-            try:
-                site_date = datetime.date.fromisoformat(site_dates[0].strip()[:10]).isoformat()
-            except ValueError:
-                pass
+        site_date = cls._site_date(page)
         return {
             "event_title": cls._text(titles[0]) if titles else event_url.rsplit("/", 1)[-1],
             "days": days, "claim": claim, "site_date": site_date,
@@ -235,7 +237,11 @@ class AitherEventClaim(_PluginBase):
                 method, url, kwargs = "GET", target, {}
                 continue
             if response.status_code >= 400:
-                raise ValueError(f"站点请求失败（HTTP {response.status_code}）")
+                error = ValueError(f"站点请求失败（HTTP {response.status_code}）")
+                error.status_code = response.status_code
+                error.response_url = self._safe_url(url)
+                error.is_challenge = bool(re.search(r"cf-chl-|challenges\.cloudflare\.com|just a moment|checking your browser", response.text or "", re.I))
+                raise error
             root = self._tree(response.text)
             if root.xpath("//input[@type='password']"):
                 raise ValueError("ATH Cookie 已失效，请更新站点 Cookie")
@@ -259,6 +265,8 @@ class AitherEventClaim(_PluginBase):
                 return {**result, "status": "失败", "message": "可领卡片缺少有效表单或 CSRF token"}
             if any(day["status"] == "状态未知" for day in progress["days"]):
                 return {**result, "status": "失败", "message": "存在无法识别的奖励状态，请检查页面"}
+            if self._rewards_finished(progress["days"], progress.get("site_date")):
+                return {**result, "status": "已结束", "message": "活动已结束，已停止该活动的每日领取"}
             site_date = progress.get("site_date")
             if not site_date and any(day["status"] == "待开放" for day in progress["days"]):
                 return {**result, "status": "失败", "message": "活动页未显示站点日期，无法判断今日奖励是否待开放"}
@@ -308,12 +316,33 @@ class AitherEventClaim(_PluginBase):
             if self._safe_url(listing.url) != self.EVENTS_URL:
                 raise ValueError("返回页面不是活动列表")
             events = self._events(listing.text)
+            site_date = self._site_date(listing.text)
+            ended = self.get_data("ended_events") or {}
+            snapshots = self.get_data("event_snapshots") or {}
             results = []
             for event in events:
+                if event["event_url"] in ended:
+                    results.append({**event, "site_date": site_date, "status": "已结束", "message": "活动已结束，已停止该活动的每日领取"})
+                    continue
                 try:
                     results.append(self._claim_event(session, event, expected_date))
                 except Exception as err:
-                    results.append({**event, **self._failure(err)})
+                    snapshot = snapshots.get(event["event_url"]) or {}
+                    days = snapshot.get("days") or []
+                    candidate = {**snapshot, **event, "site_date": site_date}
+                    if (getattr(err, "status_code", None) in (404, 410) and
+                            getattr(err, "response_url", "") == event["event_url"] and not getattr(err, "is_challenge", False) and
+                            (not expected_date or expected_date == site_date) and self._rewards_finished(days, site_date)):
+                        results.append({**candidate, "status": "已结束", "message": "活动页面已不存在，缓存显示活动已截止"})
+                    else:
+                        results.append({**event, **self._failure(err)})
+            listed = {event["event_url"] for event in events}
+            for url, snapshot in snapshots.items():
+                days = snapshot.get("days") or []
+                candidate = {**snapshot, "event_url": url, "site_date": site_date}
+                if (url not in listed and url not in ended and
+                        (not expected_date or expected_date == site_date) and self._rewards_finished(days, site_date)):
+                    results.append({**candidate, "status": "已结束", "message": "活动已结束，已停止该活动的每日领取"})
             return results
 
     @staticmethod
@@ -358,12 +387,18 @@ class AitherEventClaim(_PluginBase):
             self._schedule_retry(results, used)
             checked = self._now().strftime("%Y-%m-%d %H:%M:%S")
             snapshots = self.get_data("event_snapshots") or {}
+            ended = self.get_data("ended_events") or {}
+            newly_ended = False
             records = []
             for result in results:
                 record = {key: result.get(key, "") for key in
                           ("event_url", "event_title", "status", "reward", "message", "starts_at", "ends_at", "site_date")}
                 record["time"] = checked
                 records.append(record)
+                url = result.get("event_url")
+                if url and result["status"] == "已结束" and url not in ended:
+                    ended[url] = {"event_title": record["event_title"], "time": checked}
+                    newly_ended = True
                 if result.get("days"):
                     snapshots[result["event_url"]] = {
                         **record, "days": result["days"],
@@ -373,11 +408,12 @@ class AitherEventClaim(_PluginBase):
             # 保留最近 30 个活动缓存；历史和缓存从不保存表单或 CSRF。
             snapshots = dict(sorted(snapshots.items(), key=lambda item: item[1].get("time", ""))[-30:])
             self.save_data("event_snapshots", snapshots)
+            self.save_data("ended_events", ended)
             self.save_data("claim_logs", ((self.get_data("claim_logs") or []) + records)[-self.MAX_HISTORY:])
             summary = f"检查 {len(results)} 个活动，成功 {sum(r['status'] == '成功' for r in results)}，失败 {sum(r['status'] == '失败' for r in results)}"
             self.save_data("last_run", {"time": checked, "message": summary})
             logger.info(f"[AitherEventClaim] 执行结束：{summary}")
-            if self._notify and (onlyonce or any(r["status"] in ("成功", "失败") for r in results)):
+            if self._notify and (onlyonce or newly_ended or any(r["status"] in ("成功", "失败") for r in results)):
                 self.post_message(
                     mtype=NotificationType.SiteMessage, title="【🎁 ATH活动奖励】",
                     text=self._notification_text(results),
@@ -559,6 +595,11 @@ class AitherEventClaim(_PluginBase):
             return "⏳", "尚未开始"
         return "🟢", "进行中"
 
+    def _rewards_finished(self, days: List[dict], site_date: str) -> bool:
+        """奖励卡片末日早于站点日期，且没有待领、待开放或未知卡片时才算结束。"""
+        return bool(site_date and days and all(day.get("status") in ("已领取", "已过期未领") for day in days) and
+                    self._activity_status({"days": days, "site_date": site_date})[1] == "已过期")
+
     def _notification_text(self, results: List[dict]) -> str:
         """按活动汇总本次结果，不用旧缓存冒充本次数据。"""
         events = [result for result in results if result.get("event_url")]
@@ -566,8 +607,10 @@ class AitherEventClaim(_PluginBase):
         lines = [f"📋 获取到 {len(events)} 个活动" if not errors else "📋 活动列表获取失败"]
         for event in events:
             icon, activity_status = self._activity_status(event)
+            if event.get("status") == "已结束":
+                icon, activity_status = "⛔", "已过期"
             lines.extend(["━━━━━━━━━━━━━━", f"🎉 {event.get('event_title') or 'ATH Event'}",
-                          f"{icon} 状态：{'已截止' if activity_status == '已过期' else activity_status}"])
+                          f"{icon} 状态：{'已结束' if event.get('status') == '已结束' else '已截止' if activity_status == '已过期' else activity_status}"])
             if activity_status != "已过期":
                 lines.append(f"✨ 本次执行：{event.get('status') or '未知'}")
                 lines.append(f"🎁 领取内容：{event.get('reward') or '—'}")

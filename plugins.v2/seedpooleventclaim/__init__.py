@@ -4,7 +4,7 @@ import datetime
 import html
 import re
 import threading
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import pytz
@@ -25,7 +25,7 @@ class SeedpoolEventClaim(_PluginBase):
     plugin_name = "SP活动奖励自动领取"
     plugin_desc = "自动发现 Seedpool 全部活动，逐个领取当天奖励"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.8"
+    plugin_version = "1.0.9"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "seedpooleventclaim_"
@@ -146,6 +146,14 @@ class SeedpoolEventClaim(_PluginBase):
         return f"contains(concat(' ', normalize-space(@class), ' '), ' {name} ')"
 
     @classmethod
+    def _site_date(cls, page: str) -> str:
+        values = cls._tree(page).xpath("//footer//strong[normalize-space()='Date:']/following-sibling::span[1]/text()")
+        try:
+            return datetime.date.fromisoformat(values[0].strip()[:10]).isoformat() if values else ""
+        except ValueError:
+            return ""
+
+    @classmethod
     def _events(cls, page: str) -> List[dict]:
         root = cls._tree(page)
         mains = root.xpath(f"//main[{cls._has_class('page__event--index')}]")
@@ -211,7 +219,7 @@ class SeedpoolEventClaim(_PluginBase):
             raise ValueError("活动详情没有奖励卡片，无法判断领取状态")
         return {
             "event_title": cls._text(titles[0]) if titles else event_url.rsplit("/", 1)[-1],
-            "days": days, "claim": claim,
+            "days": days, "claim": claim, "site_date": cls._site_date(page),
             "total_days": len(days),
             "claimed_days": sum(day["status"] == "已领取" for day in days),
         }
@@ -231,7 +239,11 @@ class SeedpoolEventClaim(_PluginBase):
                 method, url, kwargs = "GET", target, {}
                 continue
             if response.status_code >= 400:
-                raise ValueError(f"站点请求失败（HTTP {response.status_code}）")
+                error = ValueError(f"站点请求失败（HTTP {response.status_code}）")
+                error.status_code = response.status_code
+                error.response_url = self._safe_url(url)
+                error.is_challenge = bool(re.search(r"cf-chl-|challenges\.cloudflare\.com|just a moment|checking your browser", response.text or "", re.I))
+                raise error
             root = self._tree(response.text)
             if root.xpath("//input[@type='password']"):
                 raise ValueError("SP Cookie 已失效，请更新站点 Cookie")
@@ -251,6 +263,8 @@ class SeedpoolEventClaim(_PluginBase):
                 return {**result, "status": "失败", "message": "可领卡片缺少有效表单或 CSRF token"}
             if any(day["status"] == "状态未知" for day in progress["days"]):
                 return {**result, "status": "失败", "message": "存在无法识别的奖励状态，请检查页面"}
+            if self._rewards_finished(progress["days"], progress.get("site_date")):
+                return {**result, "status": "已结束", "message": "活动已结束，已停止该活动的每日领取"}
             today = self._now()
             month = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[today.month - 1]
             if any(day["date"] == f"{month} {today.day}" and day["status"] == "待开放" for day in progress["days"]):
@@ -293,12 +307,33 @@ class SeedpoolEventClaim(_PluginBase):
             if self._safe_url(listing.url) != self.EVENTS_URL:
                 raise ValueError("返回页面不是活动列表")
             events = self._events(listing.text)
+            site_date = self._site_date(listing.text)
+            ended = self.get_data("ended_events") or {}
+            snapshots = self.get_data("event_snapshots") or {}
             results = []
             for event in events:
+                marker = ended.get(event["event_url"])
+                if marker and (not marker.get("ends_at") or not event.get("ends_at") or marker["ends_at"] == event["ends_at"]):
+                    results.append({**event, "site_date": site_date, "status": "已结束", "message": "活动已结束，已停止该活动的每日领取"})
+                    continue
                 try:
                     results.append(self._claim_event(session, event))
                 except Exception as err:
-                    results.append({**event, **self._failure(err)})
+                    snapshot = snapshots.get(event["event_url"]) or {}
+                    days = snapshot.get("days") or []
+                    candidate = {**snapshot, **event, "site_date": site_date}
+                    if (getattr(err, "status_code", None) in (404, 410) and
+                            getattr(err, "response_url", "") == event["event_url"] and not getattr(err, "is_challenge", False) and
+                            self._rewards_finished(days, site_date)):
+                        results.append({**candidate, "status": "已结束", "message": "活动页面已不存在，缓存显示活动已截止"})
+                    else:
+                        results.append({**event, **self._failure(err)})
+            listed = {event["event_url"] for event in events}
+            for url, snapshot in snapshots.items():
+                days = snapshot.get("days") or []
+                candidate = {**snapshot, "event_url": url, "site_date": site_date}
+                if url not in listed and url not in ended and self._rewards_finished(days, site_date):
+                    results.append({**candidate, "status": "已结束", "message": "活动已结束，已停止该活动的每日领取"})
             return results
 
     @staticmethod
@@ -344,12 +379,22 @@ class SeedpoolEventClaim(_PluginBase):
             self._schedule_retry(results, used)
             checked = self._now().strftime("%Y-%m-%d %H:%M:%S")
             snapshots = self.get_data("event_snapshots") or {}
+            ended = self.get_data("ended_events") or {}
+            newly_ended = False
             records = []
             for result in results:
                 record = {key: result.get(key, "") for key in
-                          ("event_url", "event_title", "status", "reward", "message", "starts_at", "ends_at")}
+                          ("event_url", "event_title", "status", "reward", "message", "starts_at", "ends_at", "site_date")}
                 record["time"] = checked
                 records.append(record)
+                url = result.get("event_url")
+                if url and result["status"] == "已结束" and url not in ended:
+                    ended[url] = {"event_title": record["event_title"], "ends_at": record["ends_at"], "time": checked}
+                    newly_ended = True
+                elif url in ended and result["status"] == "已结束" and record["ends_at"]:
+                    ended[url]["ends_at"] = record["ends_at"]
+                elif url in ended and result["status"] != "已结束" and result.get("ends_at") and result["ends_at"] != ended[url].get("ends_at"):
+                    ended.pop(url)
                 if result.get("days"):
                     snapshots[result["event_url"]] = {
                         **record, "days": result["days"],
@@ -359,11 +404,12 @@ class SeedpoolEventClaim(_PluginBase):
             # 保留最近 30 个活动缓存；历史和缓存从不保存表单或 CSRF。
             snapshots = dict(sorted(snapshots.items(), key=lambda item: item[1].get("time", ""))[-30:])
             self.save_data("event_snapshots", snapshots)
+            self.save_data("ended_events", ended)
             self.save_data("claim_logs", ((self.get_data("claim_logs") or []) + records)[-self.MAX_HISTORY:])
             summary = f"检查 {len(results)} 个活动，成功 {sum(r['status'] == '成功' for r in results)}，失败 {sum(r['status'] == '失败' for r in results)}"
             self.save_data("last_run", {"time": checked, "message": summary})
             logger.info(f"[SeedpoolEventClaim] 执行结束：{summary}")
-            if self._notify and (onlyonce or any(r["status"] in ("成功", "失败") for r in results)):
+            if self._notify and (onlyonce or newly_ended or any(r["status"] in ("成功", "失败") for r in results)):
                 self.post_message(
                     mtype=NotificationType.SiteMessage, title="【🎁 SP活动奖励】",
                     text=self._notification_text(results),
@@ -514,9 +560,11 @@ class SeedpoolEventClaim(_PluginBase):
                          self._table(("时间", "结果", "说明"), ("time", "status", "message"), errors[:10])])
         return page
 
-    def _activity_status(self, snapshot: dict) -> Tuple[str, str]:
+    def _activity_status(self, snapshot: dict, today: Optional[datetime.date] = None) -> Tuple[str, str]:
         """活动周期与每日领取状态分开；兼容尚未缓存列表起止日期的旧版本。"""
-        today = self._now().date()
+        if snapshot.get("status") == "已结束":
+            return "⛔", "已过期"
+        today = today or self._now().date()
         try:
             start = datetime.date.fromisoformat((snapshot.get("starts_at") or "")[:10])
             end = datetime.date.fromisoformat((snapshot.get("ends_at") or "")[:10])
@@ -545,6 +593,15 @@ class SeedpoolEventClaim(_PluginBase):
             return "⏳", "尚未开始"
         return "🟢", "进行中"
 
+    def _rewards_finished(self, days: List[dict], site_date: str) -> bool:
+        """以站点日期和奖励卡片末日判断，不使用站点活动列表可能更晚的结束日期。"""
+        try:
+            site_day = datetime.date.fromisoformat(site_date or "")
+        except ValueError:
+            return False
+        return bool(days and all(day.get("status") in ("已领取", "已过期未领") for day in days) and
+                    self._activity_status({"days": days}, today=site_day)[1] == "已过期")
+
     def _notification_text(self, results: List[dict]) -> str:
         """按活动汇总本次结果，不用旧缓存冒充本次数据。"""
         events = [result for result in results if result.get("event_url")]
@@ -552,8 +609,10 @@ class SeedpoolEventClaim(_PluginBase):
         lines = [f"📋 获取到 {len(events)} 个活动" if not errors else "📋 活动列表获取失败"]
         for event in events:
             icon, activity_status = self._activity_status(event)
+            if event.get("status") == "已结束":
+                icon, activity_status = "⛔", "已过期"
             lines.extend(["━━━━━━━━━━━━━━", f"🎉 {event.get('event_title') or 'SP Event'}",
-                          f"{icon} 状态：{'已截止' if activity_status == '已过期' else activity_status}"])
+                          f"{icon} 状态：{'已结束' if event.get('status') == '已结束' else '已截止' if activity_status == '已过期' else activity_status}"])
             if activity_status != "已过期":
                 lines.append(f"✨ 本次执行：{event.get('status') or '未知'}")
                 lines.append(f"🎁 领取内容：{event.get('reward') or '—'}")
