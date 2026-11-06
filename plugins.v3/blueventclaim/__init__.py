@@ -1,0 +1,1085 @@
+"""BLU 活动奖励自动领取。"""
+
+import datetime
+import html
+import json
+import re
+import threading
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urljoin, urlparse
+
+import pytz
+import requests
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+from app.db.oper.site import SiteOper
+from app.schemas.types import MessageType as NotificationType
+from app.sdk.config import settings
+from app.sdk.logging import logger
+from app.sdk.network import RequestUtils
+from app.sdk.plugin import _PluginBase
+
+
+class BLUEventClaim(_PluginBase):
+    """使用 MoviePilot 中的 BLU Cookie 领取当天活动奖励。"""
+
+    plugin_name = "BLU活动奖励自动领取"
+    plugin_desc = "通过 BLU 网页接口自动领取当天 Event 奖励"
+    plugin_icon = "https://blutopia.cc/favicon.svg"
+    plugin_version = "3.0.0"
+    plugin_author = "silverfoxonline"
+    author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
+    plugin_config_prefix = "blueventclaim_"
+    plugin_order = 12
+    auth_level = 1
+
+    DEFAULT_EVENT_URL = "https://blutopia.cc/giveaways/4"
+    DEFAULT_CRON = "5 9 * * *"
+    REQUEST_TIMEOUT = 30
+    MAX_HISTORY = 10
+    MAX_EVENT_SNAPSHOTS = 20
+    RETRY_INTERVAL_HOURS = 6
+    MAX_RETRIES = 2
+
+    _enabled = False
+    _onlyonce = False
+    _notify = True
+    _cron = DEFAULT_CRON
+    _random_delay = 0
+    _retry_interval_hours = RETRY_INTERVAL_HOURS
+    _max_retries = MAX_RETRIES
+    _event_url = DEFAULT_EVENT_URL
+    _cookie = ""
+    _scheduler: Optional[BackgroundScheduler] = None
+    _claim_lock = threading.Lock()
+
+    def init_plugin(self, config: dict = None):
+        """读取配置，并按需安排一次性领取。"""
+        self.stop_service()
+        if config:
+            self._enabled = config.get("enabled", False)
+            self._onlyonce = config.get("onlyonce", False)
+            self._notify = config.get("notify", True)
+            self._cron = config.get("cron") or self.DEFAULT_CRON
+            try:
+                self._random_delay = min(max(int(config.get("random_delay") or 0), 0), 60)
+            except (TypeError, ValueError):
+                self._random_delay = 0
+            try:
+                self._retry_interval_hours = min(max(int(config.get("retry_interval_hours", self.RETRY_INTERVAL_HOURS)), 1), 24)
+            except (TypeError, ValueError):
+                self._retry_interval_hours = self.RETRY_INTERVAL_HOURS
+            try:
+                self._max_retries = min(max(int(config.get("max_retries", self.MAX_RETRIES)), 0), 3)
+            except (TypeError, ValueError):
+                self._max_retries = self.MAX_RETRIES
+            self._event_url = (config.get("event_url") or self.DEFAULT_EVENT_URL).strip()
+            self._cookie = (config.get("cookie") or "").strip()
+
+        if self._onlyonce:
+            self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+            self._scheduler.add_job(
+                func=self._claim_reward,
+                trigger="date",
+                run_date=datetime.datetime.now(tz=pytz.timezone(settings.TZ))
+                + datetime.timedelta(seconds=3),
+                kwargs={"onlyonce": True},
+                name="BLU活动奖励立即领取",
+            )
+            self._scheduler.start()
+            self._onlyonce = False
+            self._save_config()
+
+    def get_state(self) -> bool:
+        """返回插件启用状态。"""
+        return self._enabled
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        """注册每日领取任务。"""
+        if not self._enabled or not self._cron or self._event_finished():
+            return []
+        try:
+            trigger = CronTrigger.from_crontab(self._cron)
+            trigger.jitter = self._random_delay * 60
+            return [{
+                "id": "BLUEventClaim",
+                "name": "BLU活动奖励自动领取",
+                "trigger": trigger,
+                "func": self._claim_reward,
+                "kwargs": {},
+            }]
+        except Exception as err:
+            logger.error(f"[BLUEventClaim] 定时配置错误: {err}")
+            return []
+
+    def stop_service(self):
+        """停止插件自行创建的一次性调度器。"""
+        if self._scheduler:
+            self._scheduler.remove_all_jobs()
+            if self._scheduler.running:
+                self._scheduler.shutdown()
+            self._scheduler = None
+
+    def _save_config(self):
+        """保存当前配置，并复位一次性运行开关。"""
+        self.update_config({
+            "enabled": self._enabled,
+            "onlyonce": False,
+            "notify": self._notify,
+            "cron": self._cron,
+            "random_delay": self._random_delay,
+            "retry_interval_hours": self._retry_interval_hours,
+            "max_retries": self._max_retries,
+            "event_url": self._event_url,
+            "cookie": self._cookie,
+        })
+
+    def _claim_reward(self, retry_count: int = 0, expected_date: str = "", onlyonce: bool = False):
+        """串行执行一次领取，并保存可审计的结果。"""
+        if self._event_finished():
+            logger.info("[BLUEventClaim] 当前活动已结束，跳过领取")
+            if onlyonce and self._notify:
+                url = self._normalized_event_url(self._event_url)
+                snapshot = (self.get_data("event_snapshots") or {}).get(url) or {}
+                self.post_message(mtype=NotificationType.SiteMessage, title="【🎁 BLU活动奖励】",
+                                  text=self._notification_text({"status": "已结束"}, snapshot))
+            return
+        now = datetime.datetime.now(pytz.timezone(settings.TZ))
+        if expected_date and now.date().isoformat() != expected_date:
+            logger.info("[BLUEventClaim] 重试已跨日，跳过过期任务")
+            return
+        if not self._claim_lock.acquire(blocking=False):
+            logger.warning("[BLUEventClaim] 已有领取任务运行，本次跳过")
+            return
+        try:
+            result = self._do_claim()
+        except Exception as err:
+            logger.exception(f"[BLUEventClaim] 领取异常: {err}")
+            result = {"status": "失败", "message": str(err)}
+        finally:
+            self._claim_lock.release()
+
+        if result["status"] == "待开放":
+            run_date = now + datetime.timedelta(hours=self._retry_interval_hours)
+            if retry_count < self._max_retries and run_date.date() == now.date():
+                try:
+                    if not self._scheduler:
+                        self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+                    self._scheduler.add_job(
+                        func=self._claim_reward,
+                        trigger="date",
+                        run_date=run_date,
+                        kwargs={"retry_count": retry_count + 1, "expected_date": now.date().isoformat()},
+                        id=f"BLUEventClaimRetry-{now.date().isoformat()}",
+                        replace_existing=True,
+                        name="BLU活动奖励稍后重试",
+                    )
+                    if not self._scheduler.running:
+                        self._scheduler.start()
+                    result["message"] += f"；已安排 {run_date.strftime('%H:%M')} 重试"
+                except Exception as err:
+                    result["status"] = "失败"
+                    result["message"] += f"；安排重试失败：{err}"
+            else:
+                result["status"] = "失败"
+                result["message"] += "；今日重试次数已用尽或已临近跨日"
+
+        record = {
+            "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "event_url": result.get("event_url", self._event_url),
+            "status": result["status"],
+            "reward": result.get("reward", ""),
+            "message": result.get("message", ""),
+            "total_days": result.get("total_days"),
+            "claimed_days": result.get("claimed_days"),
+        }
+        snapshot = {}
+        if result.get("days") is not None:
+            snapshots = self.get_data("event_snapshots") or {}
+            previous = snapshots.get(record["event_url"]) or {}
+            merged_days = list({
+                day["date"]: day
+                for day in (previous.get("days") or []) + result["days"]
+            }.values())
+            progress = self._summarize_days(merged_days)
+            record["total_days"] = progress["total_days"]
+            record["claimed_days"] = progress["claimed_days"]
+            snapshot = snapshots[record["event_url"]] = {
+                "event_url": record["event_url"],
+                "event_title": result.get("event_title", "BLU Event"),
+                "updated_at": record["time"],
+                **progress,
+            }
+            if len(snapshots) > self.MAX_EVENT_SNAPSHOTS:
+                snapshots = dict(list(snapshots.items())[-self.MAX_EVENT_SNAPSHOTS:])
+            self.save_data("event_snapshots", snapshots)
+
+        if (record["status"] == "已结束" and
+                self._normalized_event_url(record["event_url"]) == self._normalized_event_url(self._event_url)):
+            self.save_data("ended_event", {"event_url": self._normalized_event_url(record["event_url"]),
+                                           "time": record["time"]})
+            self._remove_finished_schedule()
+
+        history = self.get_data("claim_logs") or []
+        self.save_data("claim_logs", (history + [record])[-self.MAX_HISTORY:])
+
+        log_message = f"[BLUEventClaim] {record['status']}: {record['message']}"
+        if record["status"] == "失败":
+            logger.error(log_message)
+        else:
+            logger.info(log_message)
+
+        if self._notify and (onlyonce or record["status"] in ("成功", "失败", "已结束")):
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title="【🎁 BLU活动奖励】",
+                text=self._notification_text(record, snapshot),
+            )
+
+    @classmethod
+    def _notification_text(cls, record: Dict[str, Any], snapshot: Dict[str, Any]) -> str:
+        days = snapshot.get("days") or []
+        lines = ["📋 获取到 1 个活动" if days else "📋 活动数据未获取",
+                 "━━━━━━━━━━━━━━",
+                 f"🎉 {snapshot.get('event_title') or 'BLU Event'}"]
+        status = "已结束" if record.get("status") == "已结束" else cls._notification_activity_status(snapshot)
+        lines.append(f"{'🟢' if status == '进行中' else '⛔' if status in ('已截止', '已结束') else '❔'} 状态：{status}")
+        if status == "已结束":
+            lines.append("🛑 每日自动领取已停止")
+        elif status != "已截止":
+            lines.append(f"✨ 本次执行：{record.get('status') or '未知'}")
+            lines.append(f"🎁 领取内容：{record.get('reward') or '—'}")
+            if days:
+                lines.append(f"📊 已领取 {snapshot['claimed_days']}/过期 {snapshot['expired_days']}/待开放 {snapshot['future_days']}")
+            else:
+                lines.append("📊 已领取/过期/待开放：暂无数据")
+        if record.get("status") == "失败":
+            lines.append(f"⚠️ 失败原因：{record.get('message') or '未知错误'}")
+        lines.append("━━━━━━━━━━━━━━")
+        return "\n".join(lines)
+
+    @classmethod
+    def _notification_activity_status(cls, snapshot: Dict[str, Any], today: Optional[datetime.date] = None) -> str:
+        """按奖励卡片日期判断活动周期，无法判断时保留未知状态。"""
+        days = snapshot.get("days") or []
+        if not days:
+            return "未知"
+        try:
+            start = datetime.datetime.strptime(cls._event_start_date(snapshot), "%Y/%m/%d").date()
+            last = datetime.datetime.strptime(f"{days[-1]['date']} {start.year}", "%b %d %Y").date()
+            if last < start:
+                last = last.replace(year=last.year + 1)
+        except (ValueError, KeyError, TypeError):
+            return "未知"
+        today = today or datetime.datetime.now(pytz.timezone("UTC")).date()
+        return "尚未开始" if today < start else "已截止" if today > last else "进行中"
+
+    def _event_finished(self) -> bool:
+        """结束标记只约束对应活动；更换活动地址即可恢复定时任务。"""
+        ended = self.get_data("ended_event") or {}
+        current = self._normalized_event_url(self._event_url)
+        return bool(current and ended.get("event_url") == current)
+
+    @staticmethod
+    def _remove_finished_schedule():
+        """尽快移除已注册的每日任务；失败时结束标记仍阻止后续访问。"""
+        try:
+            from app.scheduler import Scheduler
+            Scheduler().remove_plugin_job("BLUEventClaim")
+        except Exception as err:
+            logger.warning(f"[BLUEventClaim] 移除已结束活动任务失败：{type(err).__name__}")
+
+    def _missing_event_result(self, page, event_url: str, snapshot: dict,
+                              site_today: datetime.date) -> Optional[Dict[str, Any]]:
+        """只有同一活动的 404/410 和已过最后一天的缓存同时存在，才认定页面已结束。"""
+        if (page is None or page.status_code not in (404, 410) or not snapshot or
+                self._normalized_event_url(page.url or "") != event_url or self._is_login_page(page) or
+                re.search(r"cf-chl-|challenges\.cloudflare\.com|just a moment|checking your browser", page.text or "", re.I)):
+            return None
+        days = snapshot.get("days") or []
+        if not (days and all(day.get("status") in ("已领取", "已过期未领") for day in days) and
+                self._notification_activity_status(snapshot, site_today) == "已截止"):
+            return None
+        return {"event_url": event_url, "event_title": snapshot.get("event_title") or "BLU Event",
+                "status": "已结束", "message": "活动页面已不存在，缓存显示活动已截止，已停止每日自动领取",
+                **self._summarize_days(days)}
+
+    def _do_claim(self, today: Optional[datetime.date] = None,
+                  site_today: Optional[datetime.date] = None) -> Dict[str, Any]:
+        """读取活动页并在需要时提交一次领取请求。"""
+        event_url = self._normalized_event_url(self._event_url)
+        if not event_url:
+            return {"status": "失败", "message": "活动地址必须是 blutopia.cc 的 HTTPS 地址"}
+
+        site = SiteOper().get_by_domain("blutopia.cc")
+        cookie = self._cookie or (site.cookie if site else "")
+        if not cookie:
+            return {"status": "失败", "message": "未填写 Cookie，MoviePilot 中也未找到 BLU 站点 Cookie"}
+
+        user_agent = (site.ua if site else "") or settings.USER_AGENT
+        proxies = settings.PROXY if site and site.proxy else None
+
+        session = requests.Session()
+        request = RequestUtils(
+            ua=user_agent,
+            cookies=cookie,
+            proxies=proxies,
+            session=session,
+            timeout=self.REQUEST_TIMEOUT,
+            referer=event_url,
+            accept_type="text/html,application/xhtml+xml",
+        )
+
+        page = request.get_res(url=event_url)
+        error = self._response_error(page, "读取活动页")
+        site_today = site_today or datetime.datetime.now(pytz.timezone("UTC")).date()
+        confirmation_only = False
+        if error:
+            snapshot = None
+            if (page is not None and page.status_code in (404, 410)) or (not proxies and settings.PROXY):
+                snapshot = (self.get_data("event_snapshots") or {}).get(event_url)
+            missing = self._missing_event_result(page, event_url, snapshot, site_today)
+            if missing:
+                return missing
+            # 只有旧缓存显示可能已结束时，才用 MP 已配置的代理复核一次。
+            # 复核页面只用于判断结束，绝不借此自动提交领取。
+            days = (snapshot or {}).get("days") or []
+            if not (not proxies and settings.PROXY and days and all(day.get("status") in ("已领取", "已过期未领") for day in days) and
+                    self._notification_activity_status(snapshot, site_today) == "已截止"):
+                return error
+            verify_request = RequestUtils(
+                ua=user_agent, cookies=cookie, proxies=settings.PROXY, session=requests.Session(),
+                timeout=self.REQUEST_TIMEOUT, referer=event_url, accept_type="text/html,application/xhtml+xml",
+            )
+            page = verify_request.get_res(url=event_url)
+            missing = self._missing_event_result(page, event_url, snapshot, site_today)
+            if missing:
+                return missing
+            if self._response_error(page, "代理复核活动页") or self._is_login_page(page):
+                return error
+            confirmation_only = True
+        if self._is_login_page(page):
+            return {"status": "失败", "message": "BLU Cookie 已失效，请先在站点设置中更新"}
+
+        progress = self._event_progress(page.text)
+        today = today or datetime.datetime.now(pytz.timezone(settings.TZ)).date()
+        today_day = self._today_day(progress, today)
+        claimable_day = next(
+            (day for day in progress["days"] if day["status"] == "今日待领取"), None
+        )
+        target_day = claimable_day or today_day
+        # BLU 会将历史已领取卡片也标记为 today-claimed，不能仅凭该类名判断当天。
+        # 沿用插件原有的 UTC 日期约定；所有卡片均为已领或过期且末日已过时确认结束。
+        days = progress["days"]
+        if (days and not claimable_day and
+                all(day["status"] in ("已领取", "已过期未领") for day in days) and
+                self._notification_activity_status({"days": days, "updated_at": site_today.isoformat()}, site_today) == "已截止"):
+            return {"event_url": event_url, "status": "已结束", "message": "活动已结束，已停止每日自动领取", **progress}
+        if confirmation_only:
+            return error
+        # BLU 标记的可领卡片优先于 MP2 本地日期，避免时区跨日漏领。
+        if not claimable_day and today_day and today_day["status"] == "已领取":
+            reward = " / ".join(today_day.get("rewards") or [])
+            return {
+                "event_url": event_url,
+                "status": "已领取",
+                "reward": reward,
+                "message": "今天的活动奖励已经领取，无需重复提交",
+                **progress,
+            }
+        if not claimable_day and today_day and today_day["status"] == "待开放":
+            return {
+                "event_url": event_url,
+                "status": "待开放",
+                "message": "今天的活动奖励尚未开放领取",
+                **progress,
+            }
+        if not target_day or target_day["status"] != "今日待领取":
+            return {
+                "event_url": event_url,
+                "status": "失败",
+                "message": "活动页未显示今天可领取的奖励卡片",
+                **progress,
+            }
+
+        csrf_token = self._csrf_token(page.text)
+        if not csrf_token:
+            return {
+                "event_url": event_url,
+                "status": "失败",
+                "message": "活动页未找到 CSRF token",
+                **progress,
+            }
+
+        claim_url = self._claim_url(page.text, event_url)
+        if not claim_url:
+            return {"event_url": event_url, "status": "失败", "message": "活动页未找到领取表单", **progress}
+
+        response = request.post_res(
+            url=claim_url,
+            data={"_token": csrf_token},
+            headers={
+                "User-Agent": user_agent,
+                "Accept": "text/html,application/xhtml+xml",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://blutopia.cc",
+                "Referer": event_url,
+                "X-CSRF-TOKEN": csrf_token,
+            },
+        )
+        error = self._response_error(response, "提交领取请求")
+        if error:
+            return {"event_url": event_url, **error, **progress}
+        if self._is_login_page(response):
+            return {
+                "event_url": event_url,
+                "status": "失败",
+                "message": "领取时登录失效，请更新 BLU Cookie",
+                **progress,
+            }
+        result_progress = self._event_progress(response.text)
+        claimed_day = next(
+            (day for day in result_progress["days"] if day["date"] == target_day["date"]), None
+        )
+        if not claimed_day or claimed_day["status"] != "已领取":
+            return {
+                "event_url": event_url,
+                "status": "失败",
+                "message": "领取请求已提交，但返回页面未显示今天已领取",
+                **progress,
+            }
+
+        reward = " / ".join(claimed_day.get("rewards") or [])
+        progress = result_progress
+        return {
+            "event_url": event_url,
+            "status": "成功",
+            "reward": reward,
+            "message": "今天的 BLU 活动奖励领取成功",
+            **progress,
+        }
+
+    @staticmethod
+    def _normalized_event_url(value: str) -> str:
+        """仅接受 BLU 活动详情页，避免携带 Cookie 请求到其他主机。"""
+        try:
+            parsed = urlparse(value.strip())
+        except (AttributeError, ValueError):
+            return ""
+        if parsed.scheme != "https" or parsed.hostname != "blutopia.cc":
+            return ""
+        if not re.fullmatch(r"/giveaways/\d+/?", parsed.path):
+            return ""
+        return f"https://blutopia.cc{parsed.path.rstrip('/')}"
+
+    @staticmethod
+    def _csrf_token(page_html: str) -> str:
+        """从活动页 meta 标签读取 Laravel CSRF token。"""
+        match = re.search(
+            r'<meta\s+[^>]*name=["\']csrf-token["\'][^>]*content=["\']([^"\']+)',
+            page_html or "",
+            re.IGNORECASE,
+        )
+        if not match:
+            match = re.search(
+                r'<meta\s+[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']csrf-token["\']',
+                page_html or "",
+                re.IGNORECASE,
+            )
+        return html.unescape(match.group(1)) if match else ""
+
+    @staticmethod
+    def _claim_url(page_html: str, event_url: str) -> str:
+        """优先采用页面表单 action，只允许同站的 claims 端点。"""
+        for action in re.findall(r'<form\b[^>]*action=["\']([^"\']+)["\']', page_html or "", re.I):
+            candidate = urljoin(event_url, html.unescape(action))
+            parsed = urlparse(candidate)
+            if parsed.hostname == "blutopia.cc" and re.fullmatch(
+                r"/giveaways/\d+/claims/?", parsed.path
+            ):
+                return candidate
+        if re.search(r"events__prize-icon--today(?!-claimed)", page_html or "", re.I):
+            return f"{event_url.rstrip('/')}/claims"
+        return ""
+
+    @staticmethod
+    def _today_day(progress: Dict[str, Any], today: datetime.date) -> Optional[Dict[str, Any]]:
+        """按活动卡片日期选出今天，而非扫描整页的 yesterday 标记。"""
+        month = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[today.month - 1]
+        label = f"{month} {today.day}"
+        return next((day for day in progress["days"] if day["date"] == label), None)
+
+    @classmethod
+    def _event_progress(cls, page_html: str) -> Dict[str, Any]:
+        """解析活动名称、逐日状态和动态奖励汇总。"""
+        days = cls._event_days(page_html)
+        return {"event_title": cls._event_title(page_html), **cls._summarize_days(days)}
+
+    @classmethod
+    def _summarize_days(cls, days: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """汇总当前活动已缓存的所有日期。"""
+        status_counts = {
+            status: sum(day["status"] == status for day in days)
+            for status in ("已领取", "已过期未领", "待开放", "今日待领取")
+        }
+        return {
+            "total_days": len(days),
+            "claimed_days": status_counts["已领取"],
+            "expired_days": status_counts["已过期未领"],
+            "future_days": status_counts["待开放"],
+            "claimable_days": status_counts["今日待领取"],
+            "reward_totals": cls._reward_totals(days),
+            "days": days,
+        }
+
+    @staticmethod
+    def _event_title(page_html: str) -> str:
+        """读取活动标题。"""
+        match = re.search(
+            r'<h2\b[^>]*class=["\'][^"\']*panel__heading[^"\']*["\'][^>]*>(.*?)</h2>',
+            page_html or "",
+            re.I | re.S,
+        )
+        return BLUEventClaim._plain_text(match.group(1)) if match else "BLU Event"
+
+    @staticmethod
+    def _event_days(page_html: str) -> List[Dict[str, Any]]:
+        """把每个活动奖励卡片转换为日期、状态、奖励和原始提示。"""
+        articles = re.findall(
+            r'<article\b[^>]*class=["\'][^"\']*events__prize[^"\']*["\'][^>]*>'
+            r'(?:(?!</article>).)*</article>',
+            page_html or "",
+            re.I | re.S,
+        )
+        days = []
+        for article in articles:
+            date_match = re.search(r"<h3\b[^>]*>(.*?)</h3>", article, re.I | re.S)
+            date_text = BLUEventClaim._plain_text(date_match.group(1)) if date_match else "未知日期"
+            messages = [
+                BLUEventClaim._plain_text(content)
+                for _, content in re.findall(
+                    r'<([a-z0-9]+)\b[^>]*class=["\'][^"\']*events__prize-message'
+                    r'[^"\']*["\'][^>]*>(.*?)</\1>',
+                    article,
+                    re.I | re.S,
+                )
+            ]
+            messages = [message for message in messages if message]
+            claimed = bool(re.search(
+                r"events__prize-winnings-list|events__prize-icon--today-claimed",
+                article,
+                re.I,
+            ))
+            if claimed:
+                status = "已领取"
+                rewards = [
+                    message for message in messages
+                    if message.lower() not in {"expired", "check back later!"}
+                ]
+            elif re.search(r"events__prize-icon--today(?!-claimed)", article, re.I):
+                status = "今日待领取"
+                rewards = []
+            elif re.search(r"events__prize-icon--past|\bExpired\b", article, re.I):
+                status = "已过期未领"
+                rewards = []
+            elif re.search(r"events__prize-icon--future|Check back later", article, re.I):
+                status = "待开放"
+                rewards = []
+            else:
+                status = "状态未知"
+                rewards = []
+            days.append({
+                "date": date_text,
+                "status": status,
+                "rewards": rewards,
+                "message": " / ".join(messages),
+            })
+        return days
+
+    @staticmethod
+    def _reward_totals(days: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """汇总已领取日期中的已知及未知奖励类型。"""
+        totals: Dict[str, Dict[str, Any]] = {}
+        for day in days:
+            if day.get("status") != "已领取":
+                continue
+            for reward in day.get("rewards") or []:
+                parsed = BLUEventClaim._parse_reward(reward)
+                current = totals.setdefault(parsed["key"], {
+                    "key": parsed["key"],
+                    "label": parsed["label"],
+                    "kind": parsed["kind"],
+                    "value": 0,
+                })
+                current["value"] += parsed["value"]
+
+        priority = {"bon": 0, "fl_tokens": 1, "upload": 2}
+        result = sorted(totals.values(), key=lambda item: (priority.get(item["key"], 99), item["label"]))
+        for item in result:
+            if item["kind"] == "bytes":
+                item["display"] = BLUEventClaim._format_bytes(item["value"])
+            elif item["kind"] == "count":
+                item["display"] = f"× {int(item['value'])}"
+            else:
+                item["display"] = BLUEventClaim._format_number(item["value"])
+        return result
+
+    @staticmethod
+    def _parse_reward(reward: str) -> Dict[str, Any]:
+        """识别常见奖励；未知奖励按名称动态分组。"""
+        text = re.sub(r"\s+", " ", html.unescape(reward or "")).strip()
+        number = r"([\d,]+(?:\.\d+)?)"
+
+        match = re.fullmatch(number + r"\s*(?:BON|BP|BONUS(?:\s+POINTS?)?)", text, re.I)
+        if match:
+            return {"key": "bon", "label": "BON", "kind": "number", "value": BLUEventClaim._number(match.group(1))}
+
+        match = re.fullmatch(number + r"\s*(?:FL\s*)?(?:TOKENS?|FREELEECH\s+TOKENS?)", text, re.I)
+        if match:
+            return {"key": "fl_tokens", "label": "FL Token", "kind": "number", "value": BLUEventClaim._number(match.group(1))}
+
+        match = re.fullmatch(
+            number + r"\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB)(?:\s+UPLOAD)?",
+            text,
+            re.I,
+        )
+        if match:
+            unit = match.group(2).lower()
+            powers = {"kb": 1, "mb": 2, "gb": 3, "tb": 4, "kib": 1, "mib": 2, "gib": 3, "tib": 4}
+            base = 1024 if "i" in unit else 1000
+            value = BLUEventClaim._number(match.group(1)) * (base ** powers[unit])
+            return {"key": "upload", "label": "上传量", "kind": "bytes", "value": value}
+
+        match = re.fullmatch(number + r"\s+(.+)", text)
+        if match:
+            label = re.sub(r"\s+", " ", match.group(2)).strip()
+            key = "other:" + label.casefold()
+            return {"key": key, "label": label, "kind": "number", "value": BLUEventClaim._number(match.group(1))}
+
+        key = "other:" + text.casefold()
+        return {"key": key, "label": text or "其他奖励", "kind": "count", "value": 1}
+
+    @staticmethod
+    def _number(value: str) -> float:
+        return float((value or "0").replace(",", ""))
+
+    @staticmethod
+    def _format_number(value: float) -> str:
+        return f"{int(value):,}" if float(value).is_integer() else f"{value:,.2f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _format_bytes(value: float) -> str:
+        size = float(value)
+        for unit in ("B", "KiB", "MiB", "GiB"):
+            if abs(size) < 1024:
+                return f"{size:,.2f}".rstrip("0").rstrip(".") + f" {unit}"
+            size /= 1024
+        return f"{size:,.2f}".rstrip("0").rstrip(".") + " TiB"
+
+    @staticmethod
+    def _plain_text(value: str) -> str:
+        text = re.sub(r"<[^>]+>", " ", value or "")
+        return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+    @staticmethod
+    def _is_login_page(response: requests.Response) -> bool:
+        """识别 Cookie 失效后的登录页或重定向。"""
+        path = urlparse(response.url or "").path.rstrip("/")
+        return path == "/login" or bool(re.search(
+            r'<form\b[^>]*(?:action=["\'][^"\']*/login|id=["\']login)',
+            response.text or "",
+            re.I,
+        ))
+
+    @staticmethod
+    def _response_error(response: Optional[requests.Response], action: str) -> Optional[Dict[str, str]]:
+        """将空响应和非成功 HTTP 状态转成统一结果。"""
+        if response is None:
+            return {"status": "失败", "message": f"{action}无响应"}
+        if response.status_code >= 400:
+            return {"status": "失败", "message": f"{action}失败（HTTP {response.status_code}）"}
+        return None
+
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """返回插件配置表单。"""
+        zone = pytz.timezone(settings.TZ)
+        utc_offset_minutes = int(datetime.datetime.now(zone).utcoffset().total_seconds() // 60)
+        timezone_prefix = json.dumps(
+            f"当前时区: {html.escape(str(settings.TZ))}<br>", ensure_ascii=False,
+        )
+        timezone_display = (
+            "{{ (() => {"
+            "const p = String(cron || '').trim().split(/\\s+/);"
+            f"const prefix = {timezone_prefix};"
+            "if (p.length !== 5 || !/^\\d+$/.test(p[0]) || !/^\\d+$/.test(p[1]) "
+            "|| Number(p[0]) > 59 || Number(p[1]) > 23) "
+            "return prefix + 'BLU时区: UTC（请选择固定时间）';"
+            f"const utcMinutes = Number(p[1]) * 60 + Number(p[0]) - {utc_offset_minutes};"
+            "const minuteOfDay = ((utcMinutes % 1440) + 1440) % 1440;"
+            "const time = String(Math.floor(minuteOfDay / 60)).padStart(2, '0') + ':' "
+            "+ String(minuteOfDay % 60).padStart(2, '0');"
+            "const day = utcMinutes < 0 ? '前一天' : utcMinutes >= 1440 ? '次日' : '当天';"
+            "const dayLabel = day === '前一天' ? '<span class=\"text-error font-weight-bold\">前一天</span>' : day;"
+            "return prefix + 'BLU时区: UTC ' + time + ', 为' + dayLabel;"
+            "})() }}"
+        )
+        return [{
+            "component": "VForm",
+            "content": [{
+                "component": "VRow",
+                "content": [{
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 3},
+                    "content": [{"component": "VSwitch", "props": {
+                        "model": "enabled", "label": "启用插件",
+                    }}],
+                }, {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 3},
+                    "content": [{"component": "VSwitch", "props": {
+                        "model": "onlyonce", "label": "立即运行一次",
+                    }}],
+                }, {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 3},
+                    "content": [{"component": "VSwitch", "props": {
+                        "model": "notify", "label": "成功或失败时通知（立即运行也通知）",
+                    }}],
+                }, {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 3},
+                    "content": [{"component": "VCronField", "props": {
+                        "model": "cron", "label": "执行周期", "placeholder": self.DEFAULT_CRON,
+                    }}, {
+                        "component": "div",
+                        "props": {"class": "text-body-2 mt-2", "innerHTML": timezone_display},
+                    }],
+                }],
+            }, {
+                "component": "VRow",
+                "content": [{
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 3},
+                    "content": [{"component": "VTextField", "props": {
+                        "model": "random_delay",
+                        "label": "随机延迟（分钟）",
+                        "type": "number",
+                        "min": 0,
+                        "max": 60,
+                        "hint": "Cron 到点后随机延迟 0～N 分钟；0 表示关闭。",
+                    }}],
+                }, {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 9},
+                    "content": [{"component": "VTextField", "props": {
+                        "model": "event_url",
+                        "label": "BLU 活动详情页",
+                        "placeholder": self.DEFAULT_EVENT_URL,
+                        "hint": "活动编号变化时只需更新此地址；Cookie 自动读取 MoviePilot 的 BLU 站点配置。",
+                    }}],
+                }],
+            }, {
+                "component": "VRow",
+                "content": [{
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 3},
+                    "content": [{"component": "VTextField", "props": {
+                        "model": "retry_interval_hours",
+                        "label": "未开放补查间隔（小时）",
+                        "type": "number",
+                        "min": 1,
+                        "max": 24,
+                        "hint": "默认 6 小时；仅网页显示未开放时补查，跨日自动跳过。",
+                    }}],
+                }, {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 3},
+                    "content": [{"component": "VTextField", "props": {
+                        "model": "max_retries",
+                        "label": "当日最多补查次数",
+                        "type": "number",
+                        "min": 0,
+                        "max": 3,
+                        "hint": "默认 2 次；0 表示不补查，不计首次执行。",
+                    }}],
+                }],
+            }, {
+                "component": "VRow",
+                "content": [{
+                    "component": "VCol",
+                    "props": {"cols": 12},
+                    "content": [{"component": "VTextField", "props": {
+                        "model": "cookie",
+                        "label": "BLU Cookie（可选）",
+                        "type": "password",
+                        "placeholder": "留空则读取 MoviePilot 的 BLU 站点 Cookie",
+                        "hint": "填写后优先使用此 Cookie；不会写入插件日志或领取历史。",
+                    }}],
+                }],
+            }, {
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "text": "仅定时、立即运行或按配置补查时访问 BLU；打开详情页只读取本地缓存。已领取时请求一次，需要领取时请求两次。随机延迟只影响 Cron 定时任务。",
+                },
+            }],
+        }], {
+            "enabled": False,
+            "onlyonce": False,
+            "notify": True,
+            "cron": self.DEFAULT_CRON,
+            "random_delay": 0,
+            "retry_interval_hours": self.RETRY_INTERVAL_HOURS,
+            "max_retries": self.MAX_RETRIES,
+            "event_url": self.DEFAULT_EVENT_URL,
+            "cookie": "",
+        }
+
+    def get_page(self) -> List[dict]:
+        """只读取本地缓存，展示当前活动统计、逐日状态和执行历史。"""
+        event_url = self._normalized_event_url(self._event_url) or self._event_url
+        snapshot = (self.get_data("event_snapshots") or {}).get(event_url)
+        all_records = list(reversed(self.get_data("claim_logs") or []))
+        records = [
+            item for item in all_records
+            if item.get("event_url") == event_url
+            or (not item.get("event_url") and event_url == self.DEFAULT_EVENT_URL)
+        ][:10]
+        latest_record = records[0] if records else None
+        if latest_record:
+            latest_status = latest_record.get("status") or "状态未知"
+            latest_detail = " · ".join(filter(None, [
+                latest_record.get("time"),
+                latest_record.get("message"),
+                f"奖励：{latest_record.get('reward')}" if latest_record.get("reward") else "",
+            ]))
+            latest_alert = {
+                "component": "VAlert",
+                "props": {
+                    "type": "error" if latest_status == "失败" else "warning" if latest_status == "待开放" else "success",
+                    "variant": "tonal",
+                    "title": f"最近执行：{latest_status}",
+                    "text": latest_detail,
+                    "class": "mb-4",
+                },
+            }
+        else:
+            latest_alert = {
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "title": "尚未执行",
+                    "text": "勾选“立即运行一次”并保存配置后，任务会在约 3 秒后执行。",
+                    "class": "mb-4",
+                },
+            }
+
+        history_components = [{
+            "component": "div",
+            "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"},
+            "text": "执行历史",
+        }, {
+            "component": "VRow",
+            "content": [{
+                "component": "VCol",
+                "props": {"cols": 12},
+                "content": [self._display_table(
+                    ("时间", "结果", "本次奖励", "说明"),
+                    ("time", "status", "reward", "message"),
+                    records,
+                )],
+            }],
+        }]
+        if not snapshot:
+            return [latest_alert, {
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "title": "暂无每日状态缓存",
+                    "text": "最近一次读取尚未产生有效的活动页面；具体结果请查看上方提示和下方执行历史。",
+                    "class": "mb-4",
+                },
+            }, *history_components]
+
+        summary = [
+            ("活动总天数", snapshot.get("total_days", 0), "info"),
+            ("已领取", snapshot.get("claimed_days", 0), "success"),
+            ("已过期未领", snapshot.get("expired_days", 0), "error"),
+            ("今日待领取", snapshot.get("claimable_days", 0), "warning"),
+            ("待开放", snapshot.get("future_days", 0), "info"),
+        ]
+        reward_totals = snapshot.get("reward_totals") or []
+        status_icons = {
+            "已领取": "✅ 已领取",
+            "已过期未领": "⛔ 已过期未领",
+            "今日待领取": "🎁 今日待领取",
+            "待开放": "⏳ 待开放",
+            "状态未知": "❔ 状态未知",
+        }
+        day_items = []
+        current_month = datetime.datetime.now(pytz.timezone(settings.TZ)).strftime("%b")
+        for day in self._visible_days(snapshot.get("days") or [], current_month):
+            status = day.get("status", "状态未知")
+            status_text = status_icons.get(status, status)
+            if status == "已领取":
+                reward = " / ".join(day.get("rewards") or []) or day.get("message") or ""
+                if reward:
+                    status_text += f" {reward}"
+            day_items.append({"date": day.get("date", "未知日期"), "status": status_text})
+        day_columns = [day_items[:10], day_items[10:20], day_items[20:]]
+        event_heading = (
+            f"{snapshot.get('event_title') or 'BLU Event'} "
+            f"(Start: {self._event_start_date(snapshot)})"
+        )
+
+        page = [{
+            "component": "div",
+            "props": {"class": "text-h5 font-weight-bold mt-2 mb-4"},
+            "text": f"🎉 {event_heading}",
+        }, latest_alert, {
+            "component": "VRow",
+            "content": [{
+                "component": "VCol",
+                "props": {"cols": 12, "sm": 6, "md": 2},
+                "content": [{
+                    "component": "VAlert",
+                    "props": {
+                        "type": color,
+                        "variant": "tonal",
+                        "title": title,
+                        "text": str(value),
+                    },
+                }],
+            } for title, value, color in summary],
+        }, {
+            "component": "div",
+            "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"},
+            "text": "奖励总计",
+        }]
+
+        if reward_totals:
+            page.append({
+                "component": "VRow",
+                "content": [{
+                    "component": "VCol",
+                    "props": {"cols": 12, "sm": 6, "md": 3},
+                    "content": [{
+                        "component": "VAlert",
+                        "props": {
+                            "type": "success",
+                            "variant": "tonal",
+                            "title": item.get("label") or "其他奖励",
+                            "text": item.get("display") or "—",
+                        },
+                    }],
+                } for item in reward_totals],
+            })
+        else:
+            page.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "text": "当前活动尚无已领取奖励。",
+                },
+            })
+
+        page.extend([{
+            "component": "div",
+            "props": {"class": "text-h6 font-weight-bold mt-4 mb-2"},
+            "text": "每日状态",
+        }, {
+            "component": "VRow",
+            "content": [{
+                "component": "VCol",
+                "props": {"cols": 12, "md": 4},
+                "content": [self._display_table(
+                    ("日期", "状态 / 奖励"),
+                    ("date", "status"),
+                    items,
+                )],
+            } for items in day_columns if items],
+        }])
+        page.extend(history_components)
+        return page
+
+    @staticmethod
+    def _visible_days(days: List[dict], current_month: str) -> List[dict]:
+        """跨月活动只展示当前月；单月缓存仍照原样展示。"""
+        def month(day: dict) -> str:
+            match = re.match(r"([A-Za-z]{3})\s+\d{1,2}\b", day.get("date") or "")
+            return match.group(1).lower() if match else ""
+
+        months = {month(day) for day in days}
+        months.discard("")
+        if len(months) > 1 and current_month.lower() in months:
+            return [day for day in days if month(day) == current_month.lower()]
+        return days
+
+    @staticmethod
+    def _display_table(headers: tuple, keys: tuple, items: List[dict]) -> dict:
+        """使用 MP2 插件页面已支持的 VTable 渲染缓存记录。"""
+        return {
+            "component": "VTable",
+            "props": {"density": "compact", "hover": True},
+            "content": [{
+                "component": "thead",
+                "content": [{
+                    "component": "tr",
+                    "content": [{"component": "th", "text": title} for title in headers],
+                }],
+            }, {
+                "component": "tbody",
+                "content": [{
+                    "component": "tr",
+                    "content": [{
+                        "component": "td",
+                        "text": str(item.get(key) or "—"),
+                    } for key in keys],
+                } for item in items],
+            }],
+        }
+
+    @staticmethod
+    def _event_start_date(snapshot: Dict[str, Any]) -> str:
+        """根据首个活动日期和缓存时间补全年份。"""
+        days = snapshot.get("days") or []
+        first_date = days[0].get("date", "") if days else ""
+        match = re.fullmatch(r"([A-Za-z]{3})\s+(\d{1,2})", first_date.strip())
+        if not match:
+            return "—"
+
+        months = {
+            "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+        }
+        month = months.get(match.group(1).lower())
+        if not month:
+            return "—"
+
+        updated_at = snapshot.get("updated_at") or ""
+        try:
+            checked = datetime.datetime.strptime(updated_at[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            checked = datetime.date.today()
+        try:
+            candidates = [
+                datetime.date(checked.year + offset, month, int(match.group(2)))
+                for offset in (-1, 0, 1)
+            ]
+        except ValueError:
+            return "—"
+        start = min(candidates, key=lambda value: abs((value - checked).days))
+        return start.strftime("%Y/%m/%d")
+
+    def get_command(self) -> List[Dict[str, Any]]:
+        """本插件不注册远程命令。"""
+        return []
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        """本插件不暴露 MoviePilot API。"""
+        return []

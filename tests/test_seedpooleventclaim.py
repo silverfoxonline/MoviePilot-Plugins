@@ -435,7 +435,8 @@ class SeedpoolEventClaimTest(unittest.TestCase):
                       **Plugin._event(claimed_page(event_id).replace("100 BON", reward), url)}
             with patch.object(self.plugin, "_run", return_value=[result]):
                 self.plugin.claim_rewards()
-        page = self.plugin.get_page()
+        with patch.object(self.plugin, "_now", return_value=datetime.datetime(2026, 10, 27)):
+            page = self.plugin.get_page()
         tabs = page[1]["content"]
         labels = [node for node in tabs if node["component"] == "label"]
         self.assertEqual([node["text"] for node in labels], ["🟢 Dailies2", "🟢 Spooktober2026"])

@@ -1,4 +1,40 @@
 {
+  "AitherEventClaim": {
+    "name": "ATH活动奖励自动领取", "description": "自动发现并领取 Aither 活动奖励。",
+    "labels": "站点,签到,ATH", "version": "3.0.0", "icon": "https://aither.cc/favicon/favicon.svg",
+    "author": "silverfoxonline", "level": 1, "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 MoviePilot V3 接口。"}
+  },
+  "SeedpoolEventClaim": {
+    "name": "SP活动奖励自动领取", "description": "自动发现并领取 Seedpool 活动奖励。",
+    "labels": "站点,签到,SP", "version": "3.0.0", "icon": "signin.png",
+    "author": "silverfoxonline", "level": 1, "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 MoviePilot V3 接口。"}
+  },
+  "BLUEventClaim": {
+    "name": "BLU活动奖励自动领取", "description": "自动领取 Blutopia 活动奖励。",
+    "labels": "站点,签到,BLU", "version": "3.0.0", "icon": "https://blutopia.cc/favicon.svg",
+    "author": "silverfoxonline", "level": 1, "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 MoviePilot V3 接口。"}
+  },
+  "DownloadTaskTagCustom": {
+    "name": "下载任务标签自定义", "description": "根据 Tracker 域名为下载任务添加自定义标签。",
+    "labels": "下载,标签,站点", "version": "3.0.0", "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Youtube-dl_B.png",
+    "author": "silverfoxonline", "level": 1, "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 MoviePilot V3 接口。"}
+  },
+  "DStudioSignIn": {
+    "name": "DStudio签到", "description": "使用 MoviePilot 站点配置自动完成 DStudio 每日签到。",
+    "labels": "站点,签到", "version": "3.0.0", "icon": "signin.png",
+    "author": "silverfoxonline", "level": 1, "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 MoviePilot V3 接口。"}
+  },
+  "Savept": {
+    "name": "Vue-PT监护室", "description": "展示 PT 站点运行状态、病危通知与站庆预告。",
+    "labels": "站点,工具", "version": "3.0.0", "icon": "https://raw.githubusercontent.com/KoWming/MoviePilot-Plugins/main/icons/savept.png",
+    "author": "KoWming,silverfoxonline", "level": 2, "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 MoviePilot V3 接口。"}
+  },
   "nodeseeksign": {
     "name": "NodeSeek论坛签到",
     "description": "自动完成 NodeSeek 论坛每日签到。",

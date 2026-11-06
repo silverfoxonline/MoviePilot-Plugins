@@ -35,6 +35,7 @@
     "icon": "https://aither.cc/favicon/favicon.svg",
     "author": "silverfoxonline",
     "level": 1,
+    "v3": false,
     "history": {
       "v1.0.2": "根据站点日期识别各活动结束并通知，跳过已结束活动，继续发现新活动",
       "v1.0.1": "调整通知中的领取、过期和待开放数量显示格式",
@@ -49,6 +50,7 @@
     "icon": "signin.png",
     "author": "silverfoxonline",
     "level": 1,
+    "v3": false,
     "history": {
       "v1.0.9": "根据站点日期识别各活动结束并通知，跳过已结束活动，继续发现新活动",
       "v1.0.8": "调整通知中的领取、过期和待开放数量显示格式",
@@ -70,6 +72,7 @@
     "icon": "https://blutopia.cc/favicon.svg",
     "author": "silverfoxonline",
     "level": 1,
+    "v3": false,
     "history": {
       "v1.0.9": "识别已结束活动并发送结束通知，停止该活动的每日领取；更换活动地址后恢复运行",
       "v1.0.8": "调整通知中的领取、过期和待开放数量显示格式",
@@ -104,6 +107,7 @@
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Youtube-dl_B.png",
     "author": "silverfoxonline",
     "level": 1,
+    "v3": false,
     "history": {
       "v1.1.0": "增加扫描防并发、标签写入结果校验和详情页成功失败日志",
       "v1.0.0": "支持 Tracker 到自定义标签映射，内置 BLU、AITHER、BHD"
@@ -117,6 +121,7 @@
     "icon": "signin.png",
     "author": "silverfoxonline",
     "level": 1,
+    "v3": false,
     "history": {
       "v1.2.1": "优化签到通知格式，分段展示状态、魔力、签到统计、排名和时间",
       "v1.2.0": "修复签到页仅 GET 未提交 POST 表单的问题",
@@ -132,6 +137,7 @@
     "icon": "https://raw.githubusercontent.com/KoWming/MoviePilot-Plugins/main/icons/savept.png",
     "author": "KoWming,silverfoxonline",
     "level": 2,
+    "v3": false,
     "history": {
       "v1.1.2": "修复站点卡片整页正则回溯导致 MP2 卡死，改为 HTML 节点解析",
       "v1.1.1": "基于 KoWming 原版 Vue-PT监护室"
