@@ -1,4 +1,34 @@
 {
+  "SyncCookieCloud": {
+    "name": "同步CookieCloud", "description": "将站点 Cookie 同步到本地 CookieCloud。",
+    "labels": "站点,Cookie", "version": "3.0.0", "icon": "Cookiecloud_A.png",
+    "author": "thsrite, silverfoxonline", "level": 1, "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 V3，并保留 Cookie 值中的等号。"}
+  },
+  "CustomSites": {
+    "name": "自定义站点", "description": "维护自定义站点及 Cookie。",
+    "labels": "站点", "version": "3.0.0", "icon": "world.png",
+    "author": "lightolly, silverfoxonline", "level": 2, "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 MoviePilot V3 接口。"}
+  },
+  "InvitesSignin": {
+    "name": "药丸签到", "description": "自动完成药丸签到。",
+    "labels": "站点,签到", "version": "3.1.0", "icon": "invites.png",
+    "author": "thsrite, silverfoxonline", "level": 2, "system_version": ">=3.0.0",
+    "history": {"v3.1.0": "适配 MoviePilot V3 接口。"}
+  },
+  "ZhuqueHelper": {
+    "name": "朱雀助手", "description": "朱雀站点任务与信息助手。",
+    "labels": "站点,签到", "version": "3.0.0", "icon": "https://raw.githubusercontent.com/KoWming/MoviePilot-Plugins/main/icons/zhuquehelper.png",
+    "author": "KoWming, silverfoxonline", "level": 2, "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 MoviePilot V3 接口。"}
+  },
+  "Limit": {
+    "name": "自动限速", "description": "按规则自动设置下载任务限速。",
+    "labels": "下载,限速", "version": "3.0.0", "icon": "Youtube-dl_A.png",
+    "author": "ClarkChen, silverfoxonline", "level": 2, "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 MoviePilot V3 接口。"}
+  },
   "AitherEventClaim": {
     "name": "ATH活动奖励自动领取", "description": "自动发现并领取 Aither 活动奖励。",
     "labels": "站点,签到,ATH", "version": "3.0.0", "icon": "https://aither.cc/favicon/favicon.svg",
@@ -19,9 +49,9 @@
   },
   "DownloadTaskTagCustom": {
     "name": "下载任务标签自定义", "description": "根据 Tracker 域名为下载任务添加自定义标签。",
-    "labels": "下载,标签,站点", "version": "3.0.0", "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Youtube-dl_B.png",
+    "labels": "下载,标签,站点", "version": "3.0.1", "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Youtube-dl_B.png",
     "author": "silverfoxonline", "level": 1, "system_version": ">=3.0.0",
-    "history": {"v3.0.0": "适配 MoviePilot V3 接口。"}
+    "history": {"v3.0.1": "跳过扫描期间已删除的种子，继续处理其他任务。", "v3.0.0": "适配 MoviePilot V3 接口。"}
   },
   "DStudioSignIn": {
     "name": "DStudio签到", "description": "使用 MoviePilot 站点配置自动完成 DStudio 每日签到。",

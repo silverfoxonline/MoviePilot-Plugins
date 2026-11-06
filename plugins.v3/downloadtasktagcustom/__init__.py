@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from qbittorrentapi.exceptions import NotFound404Error
 
 from app.schemas import ServiceInfo
 from app.sdk.config import settings
@@ -17,7 +18,7 @@ class DownloadTaskTagCustom(_PluginBase):
     plugin_name = "下载任务标签自定义"
     plugin_desc = "根据 Tracker 域名为下载任务添加自定义标签"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Youtube-dl_B.png"
-    plugin_version = "3.0.0"
+    plugin_version = "3.0.1"
     plugin_author = "silverfoxonline"
     author_url = "https://github.com/silverfoxonline/MoviePilot-Plugins"
     plugin_config_prefix = "downloadtasktagcustom_"
@@ -152,7 +153,12 @@ class DownloadTaskTagCustom(_PluginBase):
                 if self._event.is_set():
                     return
                 scanned += 1
-                labels = self._matched_labels(self._get_trackers(torrent, service.type))
+                try:
+                    trackers = self._get_trackers(torrent, service.type)
+                except NotFound404Error:
+                    logger.info("[DownloadTaskTagCustom] 下载任务已不存在，跳过并继续扫描")
+                    continue
+                labels = self._matched_labels(trackers)
                 if not labels:
                     continue
                 current_labels = self._get_labels(torrent, service.type)
