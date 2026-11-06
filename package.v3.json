@@ -1,4 +1,28 @@
 {
+  "AutoBackup": {
+    "name": "自动备份", "description": "自动备份数据和配置文件。",
+    "labels": "备份", "version": "3.0.1", "icon": "Time_machine_B.png",
+    "author": "thsrite, silverfoxonline", "level": 1, "system_version": ">=3.0.0",
+    "history": {"v3.0.1": "迁移插件基类到 V3 SDK。"}
+  },
+  "ugreendiscuz": {
+    "name": "绿联论坛签到", "description": "绿联论坛登录、签到和通知。",
+    "labels": "站点,签到", "version": "3.0.1", "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/lvlian.jpg",
+    "author": "madrays, silverfoxonline", "level": 2, "system_version": ">=3.0.0",
+    "history": {"v3.0.1": "迁移旧导入到 V3 SDK。"}
+  },
+  "FengchaoSignin": {
+    "name": "蜂巢论坛签到", "description": "蜂巢论坛签到及站点统计同步。",
+    "labels": "站点,签到", "version": "3.1.11", "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/fengchao.png",
+    "author": "madrays, silverfoxonline", "level": 2, "system_version": ">=3.0.0",
+    "history": {"v3.1.11": "迁移旧导入到 V3 接口。"}
+  },
+  "HDBlueSignin": {
+    "name": "蓝影论坛签到", "description": "使用专用密钥自动签到蓝影论坛。",
+    "labels": "站点,签到", "version": "2.0.3", "icon": "https://raw.githubusercontent.com/wzxcom/MoviePilot-Plugins/main/icons/hdblue-logo-004699311fe1.png",
+    "author": "wzxcom, silverfoxonline", "level": 1, "system_version": ">=3.0.0",
+    "history": {"v2.0.3": "迁移旧导入到 V3 接口。"}
+  },
   "SyncCookieCloud": {
     "name": "同步CookieCloud", "description": "将站点 Cookie 同步到本地 CookieCloud。",
     "labels": "站点,Cookie", "version": "3.0.0", "icon": "Cookiecloud_A.png",
