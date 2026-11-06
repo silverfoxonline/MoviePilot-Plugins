@@ -1,0 +1,15 @@
+{
+  "DownloadSiteTagCustom": {
+    "name": "下载任务分类与标签-改版",
+    "description": "自动给下载任务分类，并将指定站点名称统一为自定义标签。",
+    "labels": "下载,标签,站点",
+    "version": "3.0.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Youtube-dl_B.png",
+    "author": "silverfoxonline",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v3.0.0": "适配 V3 下载历史的统一媒体身份，保留站点标签与分类设置。"
+    }
+  }
+}
