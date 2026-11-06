@@ -3,11 +3,12 @@
     "name": "NodeSeek论坛签到",
     "description": "自动完成 NodeSeek 论坛每日签到。",
     "labels": "站点,签到",
-    "version": "2.1.0",
+    "version": "2.1.1",
     "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/nodeseeksign.png",
-    "author": "madrays",
+    "author": "madrays, silverfoxonline",
     "level": 1,
     "history": {
+      "v2.1.1": "保留原作者信息并加入维护者 silverfoxonline。",
       "v2.1.0": "保留原作者下架前版本，维持现有配置兼容。"
     }
   },
@@ -15,11 +16,12 @@
     "name": "飞牛论坛签到",
     "description": "自动完成飞牛论坛每日签到。",
     "labels": "站点,签到",
-    "version": "2.5.7",
+    "version": "2.5.8",
     "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/fnos.ico",
-    "author": "madrays",
+    "author": "madrays, silverfoxonline",
     "level": 1,
     "history": {
+      "v2.5.8": "保留原作者信息并加入维护者 silverfoxonline。",
       "v2.5.7": "保留原作者下架前版本，维持现有配置兼容。"
     }
   },
