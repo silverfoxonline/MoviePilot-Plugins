@@ -1,4 +1,26 @@
 {
+  "nodeseeksign": {
+    "name": "NodeSeek论坛签到",
+    "description": "自动完成 NodeSeek 论坛每日签到。",
+    "labels": "站点,签到",
+    "version": "3.0.0",
+    "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/nodeseeksign.png",
+    "author": "madrays, silverfoxonline",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 MoviePilot V3 官方接口。"}
+  },
+  "fnossign": {
+    "name": "飞牛论坛签到",
+    "description": "自动完成飞牛论坛每日签到。",
+    "labels": "站点,签到",
+    "version": "3.0.0",
+    "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/fnos.ico",
+    "author": "madrays, silverfoxonline",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {"v3.0.0": "适配 MoviePilot V3 官方接口。"}
+  },
   "IYUUAutoSeed": {
     "name": "IYUU自动辅种",
     "description": "使用 IYUU 自动辅种，兼容 MoviePilot V3。",

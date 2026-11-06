@@ -7,6 +7,7 @@
     "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/nodeseeksign.png",
     "author": "madrays, silverfoxonline",
     "level": 1,
+    "v3": false,
     "history": {
       "v2.1.1": "保留原作者信息并加入维护者 silverfoxonline。",
       "v2.1.0": "保留原作者下架前版本，维持现有配置兼容。"
@@ -20,6 +21,7 @@
     "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/fnos.ico",
     "author": "madrays, silverfoxonline",
     "level": 1,
+    "v3": false,
     "history": {
       "v2.5.8": "保留原作者信息并加入维护者 silverfoxonline。",
       "v2.5.7": "保留原作者下架前版本，维持现有配置兼容。"
