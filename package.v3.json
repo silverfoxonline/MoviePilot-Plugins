@@ -1,4 +1,17 @@
 {
+  "IYUUAutoSeed": {
+    "name": "IYUU自动辅种",
+    "description": "使用 IYUU 自动辅种，兼容 MoviePilot V3。",
+    "labels": "下载,辅种",
+    "version": "3.0.0",
+    "icon": "IYUU.png",
+    "author": "jxxghp, CKun, silverfoxonline",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v3.0.0": "适配 V3 接口；站点初始化失败时保留原因并避免重复请求。"
+    }
+  },
   "DownloadSiteTagCustom": {
     "name": "下载任务分类与标签-改版",
     "description": "自动给下载任务分类，并将指定站点名称统一为自定义标签。",
